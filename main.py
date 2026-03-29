@@ -3,9 +3,9 @@ import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-TELEGRAM_TOKEN = os.getenv("8734915350:AAHYzYM-udE1sRcxYLJtp0NS8guVD6Ao890")
-NOTION_TOKEN = os.getenv("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")
-DATABASE_ID = os.getenv("3328c4d1fb0e80338915c1b18ec915ed")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+DATABASE_ID = os.getenv("DATABASE_ID")
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -34,7 +34,6 @@ def search_in_notion(client_name, item_id):
     page = data["results"][0]["properties"]
     
     try:
-        # Аккуратно достаем данные, используем .get() чтобы не было ошибок, если ячейка пустая
         name_list = page.get("Name", {}).get("rich_text", [])
         name = name_list[0]["plain_text"] if name_list else "Нет названия"
         
@@ -54,10 +53,15 @@ def search_in_notion(client_name, item_id):
             "size_weight": size_weight
         }
     except Exception as e:
-        print(f"Ошибка парсинга Notion: {e}")
+        print(f"Ошибка парсинга: {e}")
         return None
 
-async def finde_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- НОВАЯ ФУНКЦИЯ ДЛЯ ПРОВЕРКИ БОТА ---
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Бот работает! Отправь мне запрос через команду /find")
+
+# --- ТВОЯ ГЛАВНАЯ ФУНКЦИЯ ПОИСКА ---
+async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     lines = text.strip().split('\n')
     
@@ -70,14 +74,13 @@ async def finde_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(f"⏳ Ищу товары для {client_name}...")
     
-    # Формируем шапку ответа
+    # Шапка, как ты просил
     result_text = "/paste\n\n"
     result_text += f"Клиент: {client_name}\n\n"
     
     count = 1
     for item_line in items_requested:
         parts = item_line.split()
-        # Теперь ожидаем 2 части: parts[0] = "ID1", parts[1] = "200"
         if len(parts) >= 2:
             item_id = parts[0]
             qty = parts[1]
@@ -97,17 +100,16 @@ async def finde_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 result_text += f"❌ Товар {item_id} не найден в базе Notion!\n\n"
             count += 1
             
-    # Финальные курсы валют
     result_text += "Курс клиенту: 58\nМой курс: 55"
     
     await update.message.reply_text(result_text)
 
 if __name__ == '__main__':
-    if not TELEGRAM_TOKEN or not NOTION_TOKEN or not DATABASE_ID:
-        print("ВНИМАНИЕ: Не найдены секретные ключи (Tokens)!")
-    else:
-        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        # Регистрируем новую команду /find
-        app.add_handler(CommandHandler("finde", finde_command))
-        print("Бот успешно запущен и ждет команду /find!")
-        app.run_polling()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    
+    # Теперь бот знает ДВЕ команды
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("find", find_command))
+    
+    print("Бот успешно запущен!")
+    app.run_polling()
