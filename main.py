@@ -3,9 +3,9 @@ import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-DATABASE_ID = os.getenv("DATABASE_ID")
+TELEGRAM_TOKEN = os.getenv("8734915350:AAHYzYM-udE1sRcxYLJtp0NS8guVD6Ao890")
+NOTION_TOKEN = os.getenv("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")
+DATABASE_ID = os.getenv("3328c4d1fb0e80338915c1b18ec915ed")
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
