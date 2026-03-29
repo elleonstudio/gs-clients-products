@@ -71,7 +71,7 @@ async def finde_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏳ Ищу товары для {client_name}...")
     
     # Формируем шапку ответа
-    result_text = "/calc\n\n"
+    result_text = "/paste\n\n"
     result_text += f"Клиент: {client_name}\n\n"
     
     count = 1
