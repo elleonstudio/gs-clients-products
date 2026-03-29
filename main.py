@@ -4,8 +4,8 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # Вставь сюда свои данные
-TELEGRAM_TOKEN = "ТВОЙ_ТЕЛЕГРАМ_ТОКЕН"
-NOTION_TOKEN = "ТВОЙ_СЕКРЕТ_NOTION"
+TELEGRAM_TOKEN = "8734915350:AAG_R2_TBwbyqPj-gKE-bjuNH-vy2OSBPUA"
+NOTION_TOKEN = "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"
 DATABASE_ID = "ТВОЙ_ID_БАЗЫ"
 
 # Настройки для Notion API
