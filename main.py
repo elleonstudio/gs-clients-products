@@ -6,7 +6,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 # Вставь сюда свои данные
 TELEGRAM_TOKEN = "8734915350:AAG_R2_TBwbyqPj-gKE-bjuNH-vy2OSBPUA"
 NOTION_TOKEN = "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"
-DATABASE_ID = "ТВОЙ_ID_БАЗЫ"
+DATABASE_ID = "3328c4d1fb0e80338915c1b18ec915ed"
 
 # Настройки для Notion API
 NOTION_HEADERS = {
