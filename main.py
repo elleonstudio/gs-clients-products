@@ -307,18 +307,43 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"❌ Ошибка Excel: {e}")
 
     # 3. Логика кнопки "Airtable"
+    # 3. Логика кнопки "Airtable"
     elif action == 'airtable':
         url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка"
         headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
         
+        # 1. Генерируем красивый текст чека для поля "Заказ"
+        inv_lines = ""
+        for i in data['items']:
+            qty = int(i['qty'])
+            price = float(i['client_price'])
+            shipping = float(i['shipping'])
+            line_total = i['line_total']
+            inv_lines += f"• {i['name']}: — {qty} шт\n{qty} × {price} + {shipping} = {line_total:.1f}¥\n\n"
+
+        rule_applied = (data['subtotal_cny'] * 0.03 * data['client_rate']) < 10000
+        
+        invoice_text = f"COMMERCIAL INVOICE: {data['client'].upper()}\n"
+        invoice_text += f"📅 Date: {datetime.now().strftime('%m.%d.%Y')}\n\n"
+        invoice_text += "1. ТОВАРНАЯ ВЕДОМОСТЬ:\n"
+        invoice_text += f"{inv_lines}────────────────────────\n"
+        invoice_text += f"SUBTOTAL: {data['subtotal_cny']:.1f}¥\n\n"
+        invoice_text += "2. КОМИССИЯ И СЕРВИС\n"
+        invoice_text += f"({'Минимальная 10000 AMD' if rule_applied else '3%'}): {data['actual_comm_cny']:.1f}¥\n\n"
+        invoice_text += "3. ИТОГОВЫЙ РАСЧЕТ\n"
+        invoice_text += f"• Всего в юанях: {data['subtotal_cny'] + data['actual_comm_cny']:.1f}¥\n"
+        invoice_text += f"• Курс: {data['client_rate']}\n\n"
+        invoice_text += f"✅ ИТОГО К ОПЛАТЕ: {data['final_total_amd']:,} AMD"
+
+        # 2. Формируем отправку (Без Карго кода, с новым полем Заказ)
         payload = {
             "records": [{
                 "fields": {
                     "Клиент": data["client"],
                     "Сумма (¥)": data["subtotal_cny"],
                     "Курс Клиент": data["client_rate"],
-                    "Курс Реал": data["real_rate"]
-                    # Поле Прибыль удалено, Airtable считает сам
+                    "Курс Реал": data["real_rate"],
+                    "Заказ": invoice_text
                 }
             }],
             "typecast": True
