@@ -303,6 +303,7 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.message.reply_text(f"❌ Ошибка Excel: {e}")
 
+    # 3. Логика кнопки "Airtable"
     elif action == 'airtable':
         url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка"
         headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
@@ -336,6 +337,7 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Сумма (¥)": data["subtotal_cny"],
                     "Курс Клиент": data["client_rate"],
                     "Курс Реал": data["real_rate"],
+                    "Реал Цена Закупки (¥)": data["purchase_cny"], # <--- ВОТ ТВОЯ НОВАЯ СТРОЧКА
                     "Заказ": invoice_text
                 }
             }],
@@ -350,7 +352,6 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(f"❌ Ошибка от Airtable: {resp.text}")
         except Exception as e:
             await query.message.reply_text(f"❌ Сбой соединения: {e}")
-
 
 # ====================================================================
 # ТЕЛЕГРАМ ОБРАБОТЧИКИ
