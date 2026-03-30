@@ -46,7 +46,7 @@ def get_client_catalog(client_name):
     return "\n".join(catalog)
 
 def get_item_details(client_name, item_id):
-    url = f"https://api.api.notion.com/v1/databases/{DATABASE_ID}/query"
+    url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     payload = {
         "filter": {
             "and": [
