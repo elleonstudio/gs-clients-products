@@ -1,6 +1,7 @@
 import os
 import requests
 import base64
+import json
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -18,6 +19,7 @@ NOTION_HEADERS = {
 user_sessions = {}
 
 def get_client_catalog(client_name):
+    """Достаем каталог клиента из Notion"""
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     payload = {
         "filter": {
@@ -41,6 +43,7 @@ def get_client_catalog(client_name):
     return "\n".join(catalog)
 
 def get_item_details(client_name, item_id):
+    """Берем цены и размеры для финального чека"""
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     payload = {
         "filter": {
@@ -70,43 +73,47 @@ def get_item_details(client_name, item_id):
     except:
         return None
 
-def recognize_photo_with_kimi(photo_url, catalog_text):
+def recognize_photos_batch(orders, catalog_text):
+    """Мега-функция: отправляет все фотки в Kimi за ОДИН раз"""
     url = "https://api.moonshot.cn/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {KIMI_TOKEN}",
         "Content-Type": "application/json"
     }
     
-    # 1. СКАЧИВАЕМ ФОТО НА СЕРВЕР И ПЕРЕВОДИМ В ТЕКСТ (Обход блокировок)
-    try:
-        image_data = requests.get(photo_url).content
-        base64_image = base64.b64encode(image_data).decode('utf-8')
-    except Exception as e:
-        return f"Ошибка скачивания из Telegram: {e}"
-    
+    num_photos = len(orders)
     prompt = (
-        f"Вот список товаров:\n{catalog_text}\n\n"
-        "Посмотри на фото и найди этот товар в списке. "
-        "ОТВЕТЬ СТРОГО ОДНОЙ ЦИФРОЙ (это ID товара). "
-        "Запрещено писать любые слова, точки, пробелы или пояснения. Только цифра. "
-        "Если товара нет на фото, напиши слово ERROR"
+        f"Вот каталог товаров:\n{catalog_text}\n\n"
+        f"Я отправляю тебе {num_photos} фотографий по порядку. Сопоставь КАЖДУЮ фотографию с ID товара из каталога. "
+        "Твой ответ должен быть СТРОГО в формате JSON: массив строк, где каждая строка — это ID товара для соответствующей фотографии. "
+        "Если товара нет, пиши 'ERROR'. "
+        f"Пример ответа для 3 фото: [\"1\", \"5\", \"ERROR\"]. "
+        "Никакого лишнего текста, только валидный JSON массив!"
     )
 
-    # 2. ОТПРАВЛЯЕМ ФОТО ПРЯМО В ЗАПРОСЕ (Base64)
+    # Собираем контент: 1 текстовое задание + много картинок
+    content_list = [{"type": "text", "text": prompt}]
+    
+    for order in orders:
+        try:
+            # Скачиваем фото и кодируем в текст прямо перед отправкой
+            image_data = requests.get(order["photo_url"]).content
+            base64_image = base64.b64encode(image_data).decode('utf-8')
+            content_list.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+            })
+        except Exception as e:
+            print(f"Ошибка скачивания фото: {e}")
+            # Если фото не скачалось, шлем пустышку, чтобы не сбить порядок
+            content_list.append({"type": "text", "text": "[ФОТО НЕ ЗАГРУЖЕНО]"})
+
     payload = {
         "model": "moonshot-v1-32k-vision-preview",
         "messages": [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}"
-                        }
-                    }
-                ]
+                "content": content_list
             }
         ],
         "temperature": 0.0
@@ -115,14 +122,26 @@ def recognize_photo_with_kimi(photo_url, catalog_text):
     try:
         response = requests.post(url, headers=headers, json=payload).json()
         
-        # Если Kimi вернул ошибку, выводим её текстом
         if "error" in response:
-            return f"Ответ сервера: {response['error'].get('message', 'Неизвестная ошибка')}"
+            return [f"API_ERROR: {response['error'].get('message')}"] * num_photos
             
         result_text = response["choices"][0]["message"]["content"].strip()
-        return result_text
+        
+        # Очищаем ответ от маркдауна, если Kimi все-таки его добавит
+        result_text = result_text.replace("```json", "").replace("```", "").strip()
+        
+        # Превращаем текст в настоящий список Python
+        recognized_ids = json.loads(result_text)
+        
+        # Защита от дурака: если Kimi вернул меньше ответов, чем было фоток
+        while len(recognized_ids) < num_photos:
+            recognized_ids.append("ERROR")
+            
+        return recognized_ids
+        
     except Exception as e:
-        return f"Сбой скрипта: {e}"
+        print(f"Сбой парсинга Kimi: {e}")
+        return ["CRITICAL_ERROR"] * num_photos
 
 async def client_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.split()
@@ -133,7 +152,7 @@ async def client_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client_name = text[1]
     user_id = update.message.from_user.id
     user_sessions[user_id] = {"client": client_name, "orders": []}
-    await update.message.reply_text(f"✅ Клиент {client_name} активирован!\nПересылай фото с количеством, в конце пиши /done")
+    await update.message.reply_text(f"✅ Клиент {client_name} активирован!\nПересылай фото с подписью (количеством), в конце пиши /done")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -145,6 +164,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(photo.file_id)
     photo_url = file.file_path
     
+    # Читаем количество ИЗ ПОДПИСИ к фотографии
     qty = update.message.caption
     if not qty:
         qty = "1"
@@ -161,24 +181,31 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client_name = session["client"]
     orders = session["orders"]
     
-    msg = await update.message.reply_text(f"⏳ Kimi изучает {len(orders)} фото для {client_name}...")
+    msg = await update.message.reply_text(f"⏳ Kimi изучает ВСЕ {len(orders)} фото одним запросом...")
     
     catalog_text = get_client_catalog(client_name)
     if not catalog_text:
         await msg.edit_text("❌ В Notion нет товаров для этого клиента!")
         return
         
+    # Отправляем весь пакет в Kimi
+    recognized_ids = recognize_photos_batch(orders, catalog_text)
+    
     result_text = "/resultphoto\n\n"
     result_text += f"Клиент: {client_name}\n\n"
     
     not_found_items = []
     count = 1
     
-    for order in orders:
+    # Склеиваем ответы Kimi и наши заказы
+    for order, recognized_id in zip(orders, recognized_ids):
         qty = order["qty"]
-        photo_url = order["photo_url"]
         
-        recognized_id = recognize_photo_with_kimi(photo_url, catalog_text)
+        # Если Kimi вернул ошибку или не нашел
+        if recognized_id == "ERROR" or "ERROR" in recognized_id:
+            not_found_items.append(f"Кол-во: {qty} (Ответ системы: '{recognized_id}')")
+            continue
+            
         details = get_item_details(client_name, recognized_id)
         
         if details:
@@ -191,7 +218,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result_text += f"Размеры: {details['size_weight']}\n\n"
             count += 1
         else:
-            not_found_items.append(f"Кол-во: {qty} (Ответ Kimi: '{recognized_id}')")
+            not_found_items.append(f"Кол-во: {qty} (Ответ Kimi: '{recognized_id}' - ID не найден в базе)")
             
     result_text += "Курс клиенту: 58\nМой курс: 55\n\n"
     
