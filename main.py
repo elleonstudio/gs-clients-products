@@ -278,7 +278,7 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Content-Type": "application/json"
         }
         
-        # Интеграция по структуре Baza 2026
+  # Интеграция по структуре Baza 2026
         payload = {
             "records": [
                 {
@@ -286,12 +286,12 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "Клиент": data["client"],
                         "Сумма (¥)": data["subtotal_cny"],
                         "Курс Клиент": data["client_rate"],
-                        "Курс Реал": data["real_rate"],
-                        "Прибыль (֏)": data["profit_amd"]
+                        "Курс Реал": data["real_rate"]
+                        # СТРОЧКУ С ПРИБЫЛЬЮ УДАЛИЛИ! Airtable посчитает её сам.
                     }
                 }
             ],
-            "typecast": True # Важно, если "Клиент" - это связь с другой таблицей
+            "typecast": True
         }
         
         try:
