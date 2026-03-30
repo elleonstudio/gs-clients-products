@@ -2,13 +2,20 @@ import os
 import requests
 import base64
 import json
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+import io
+import pandas as pd
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 DATABASE_ID = os.getenv("DATABASE_ID")
 KIMI_TOKEN = os.getenv("KIMI_TOKEN")
+
+# Новые токены для Airtable
+AIRTABLE_TOKEN = "patD95Wp6hbmXnSH7.401bcf4ca42844c15f76c8361ddb7d5b7a4551d58c390de27ba3586fdd7d0cc7"
+AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -17,32 +24,29 @@ NOTION_HEADERS = {
 }
 
 user_sessions = {}
+completed_orders = {} # Хранилище готовых заказов для кнопок Excel и Airtable
 
+# ====================================================================
+# ФУНКЦИИ NOTION И KIMI
+# ====================================================================
 def get_client_catalog(client_name):
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
-    payload = {
-        "filter": {
-            "property": "Client",
-            "select": {"equals": client_name}
-        }
-    }
-    response = requests.post(url, headers=NOTION_HEADERS, json=payload)
-    data = response.json()
+    payload = {"filter": {"property": "Client", "select": {"equals": client_name}}}
+    response = requests.post(url, headers=NOTION_HEADERS, json=payload).json()
     
     catalog = []
-    for item in data.get("results", []):
+    for item in response.get("results", []):
         page = item["properties"]
         try:
             item_id = page["ID"]["title"][0]["plain_text"]
             name = page.get("Name", {}).get("rich_text", [])
             name_text = name[0]["plain_text"] if name else "Без названия"
             catalog.append(f"ID: {item_id} | Название: {name_text}")
-        except:
-            continue
+        except: continue
     return "\n".join(catalog)
 
 def get_item_details(client_name, item_id):
-    url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
+    url = f"https://api.api.notion.com/v1/databases/{DATABASE_ID}/query"
     payload = {
         "filter": {
             "and": [
@@ -57,35 +61,24 @@ def get_item_details(client_name, item_id):
     page = response["results"][0]["properties"]
     try:
         name_list = page.get("Name", {}).get("rich_text", [])
-        name = name_list[0]["plain_text"] if name_list else "Нет названия"
         client_price = page.get("Client Price", {}).get("number")
         gs_price = page.get("GS Price", {}).get("number")
-        size_list = page.get("Size and weight", {}).get("rich_text", [])
-        
         return {
-            "name": name,
-            "client_price": client_price if client_price is not None else "-",
-            "gs_price": gs_price if gs_price is not None else "-",
-            "size_weight": size_list[0]["plain_text"] if size_list else "- - - -"
+            "name": name_list[0]["plain_text"] if name_list else "Нет названия",
+            "client_price": float(client_price) if client_price is not None else 0.0,
+            "gs_price": float(gs_price) if gs_price is not None else 0.0
         }
-    except:
-        return None
+    except: return None
 
 def recognize_photos_batch(orders, catalog_text):
     url = "https://api.moonshot.cn/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {KIMI_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {KIMI_TOKEN}", "Content-Type": "application/json"}
     
     num_photos = len(orders)
     prompt = (
-        f"Вот каталог товаров:\n{catalog_text}\n\n"
-        f"Я отправляю тебе {num_photos} фотографий. Сопоставь КАЖДУЮ фотографию с ID товара из каталога. "
-        "Твой ответ должен быть СТРОГО в формате JSON: массив строк, где каждая строка — это ID товара. "
-        "Если товара нет, пиши 'ERROR'. "
-        f"Пример ответа: [\"1\", \"5\", \"ERROR\"]. "
-        "Никакого лишнего текста, только JSON массив!"
+        f"Каталог:\n{catalog_text}\n\n"
+        f"Я отправляю {num_photos} фото. Сопоставь каждое с ID. "
+        "Ответ СТРОГО в формате JSON: массив строк. Если нет - 'ERROR'. Пример: [\"1\", \"ERROR\"]."
     )
 
     content_list = [{"type": "text", "text": prompt}]
@@ -93,199 +86,276 @@ def recognize_photos_batch(orders, catalog_text):
         try:
             image_data = requests.get(order["photo_url"]).content
             base64_image = base64.b64encode(image_data).decode('utf-8')
-            content_list.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-            })
+            content_list.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}})
         except:
-            content_list.append({"type": "text", "text": "[ОШИБКА ФОТО]"})
+            content_list.append({"type": "text", "text": "[ОШИБКА]"})
 
-    payload = {
-        "model": "moonshot-v1-32k-vision-preview",
-        "messages": [{"role": "user", "content": content_list}],
-        "temperature": 0.0
-    }
-    
+    payload = {"model": "moonshot-v1-32k-vision-preview", "messages": [{"role": "user", "content": content_list}], "temperature": 0.0}
     try:
         response = requests.post(url, headers=headers, json=payload).json()
-        if "error" in response: return [f"API_ERROR"] * num_photos
-        result_text = response["choices"][0]["message"]["content"].strip()
-        result_text = result_text.replace("```json", "").replace("```", "").strip()
-        recognized_ids = json.loads(result_text)
+        if "error" in response: return ["ERROR"] * num_photos
+        res_text = response["choices"][0]["message"]["content"].replace("```json", "").replace("```", "").strip()
+        recognized_ids = json.loads(res_text)
         while len(recognized_ids) < num_photos: recognized_ids.append("ERROR")
         return recognized_ids
-    except:
-        return ["CRITICAL_ERROR"] * num_photos
+    except: return ["ERROR"] * num_photos
 
-# --- ДИАЛОГОВАЯ ЧАСТЬ ---
-
+# ====================================================================
+# ДИАЛОГОВАЯ ЧАСТЬ И ФИНАЛЬНЫЙ РАСЧЕТ
+# ====================================================================
 async def ask_next_question(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    """Умный опросник: идет по списку товаров и задает вопросы"""
     session = user_sessions[user_id]
     items = session["items"]
     idx = session["current_item_index"]
 
-    # Если мы прошли все товары, выдаем финальный результат
     if idx >= len(items):
-        await generate_final_paste(update, context, user_id)
+        await generate_final_invoice(update, context, user_id)
         return
 
     item = items[idx]
 
-    # Проверка 1: Если количество '1' и мы еще не переспрашивали
     if item["qty"] == "1" and not item.get("qty_confirmed"):
         session["state"] = "ASKING_QTY"
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"❓ Товар: **{item['name']}**\nКоличество стоит: 1. Это верно?\n👉 *Напиши правильную цифру:*",
-            parse_mode="Markdown"
-        )
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❓ Товар: **{item['name']}**\nКоличество: 1. Напиши правильную цифру:", parse_mode="Markdown")
         return
 
-    # Проверка 2: Если цена доставки еще не указана
     if item.get("shipping") is None:
         session["state"] = "ASKING_SHIPPING"
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"🚚 Цена доставки для: **{item['name']}** (Кол-во: {item['qty']} шт)\n👉 *Напиши стоимость доставки:*",
-            parse_mode="Markdown"
-        )
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"🚚 Цена доставки для: **{item['name']}** ({item['qty']} шт)?", parse_mode="Markdown")
         return
 
-    # Если всё заполнено, переходим к следующему товару
     session["current_item_index"] += 1
     await ask_next_question(update, context, user_id)
 
-async def generate_final_paste(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    """Сборка финального чека /paste"""
+async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     session = user_sessions[user_id]
     client_name = session["client"]
     items = session["items"]
-    not_found_items = session["not_found_items"]
     
-    result_text = "/paste\n\n"
-    result_text += f"Клиент: {client_name}\n\n"
+    # Константы курсов
+    client_rate = 58.0
+    real_rate = 55.0
     
-    count = 1
-    for item in items:
-        result_text += f"Товар {count}:\n"
-        result_text += f"Название: {item['name']}\n"
-        result_text += f"Количество: {item['qty']}\n"
-        result_text += f"Цена клиенту: {item['client_price']}\n"
-        result_text += f"Закупка: {item['gs_price']}\n"
-        result_text += f"Доставка: {item['shipping']}\n" # Теперь доставка из опроса!
-        result_text += f"Размеры: {item['size_weight']}\n\n"
-        count += 1
+    subtotal_cny = 0
+    purchase_cny = 0
+    total_delivery_cny = 0
+    
+    inv_lines = ""
+    
+    for i in items:
+        qty = int(i['qty'])
+        price = i['client_price']
+        gs_price = i['gs_price']
+        shipping = float(i['shipping'])
         
-    result_text += "Курс клиенту: 58\nМой курс: 55\n\n"
-    
-    if not_found_items:
-        result_text += "⚠️ Kimi не смог сопоставить эти товары:\n" + "\n".join(not_found_items)
+        line_total = (price * qty) + shipping
+        subtotal_cny += line_total
+        purchase_cny += (gs_price * qty)
+        total_delivery_cny += shipping
         
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=result_text)
+        # Сохраняем численные значения для Excel
+        i['line_total'] = line_total
+        
+        inv_lines += f"• {i['name']}: — {qty} шт\n"
+        inv_lines += f"{qty} × {price} + {shipping} = {line_total:.1f}¥\n\n"
+
+    # Математика: 3% или 10 000 AMD
+    comm_amd_3pct = (subtotal_cny * 0.03) * client_rate
+    rule_applied = comm_amd_3pct < 10000
+    actual_comm_amd = 10000 if rule_applied else int(comm_amd_3pct)
+    actual_comm_cny = 10000 / client_rate if rule_applied else subtotal_cny * 0.03
+    final_total_amd = int((subtotal_cny * client_rate) + actual_comm_amd)
+
+    # Админка: Чистая прибыль
+    real_expenses_amd = int((purchase_cny + total_delivery_cny) * real_rate)
+    profit_amd = final_total_amd - real_expenses_amd
+
+    # Сохраняем итоги в сессию для экспорта
+    session.update({
+        "subtotal_cny": subtotal_cny,
+        "actual_comm_cny": actual_comm_cny,
+        "actual_comm_amd": actual_comm_amd,
+        "final_total_amd": final_total_amd,
+        "purchase_cny": purchase_cny,
+        "total_delivery_cny": total_delivery_cny,
+        "profit_amd": profit_amd,
+        "client_rate": client_rate,
+        "real_rate": real_rate
+    })
     
-    # Очищаем память
+    completed_orders[user_id] = session # Переносим в готовые заказы
+
+    # Формируем сообщение для клиента
+    msg_client = f"""<b>COMMERCIAL INVOICE: {client_name.upper()}</b>
+📅 Date: {datetime.now().strftime('%m.%d.%Y')}
+
+<b>1. ТОВАРНАЯ ВЕДОМОСТЬ:</b>
+{inv_lines}<code>────────────────────────</code>
+<b>SUBTOTAL:</b> {subtotal_cny:.1f}¥
+
+<b>2. КОМИССИЯ И СЕРВИС</b>
+({'Минимальная 10000 AMD' if rule_applied else '3%'}): {actual_comm_cny:.1f}¥
+
+<b>3. ИТОГОВЫЙ РАСЧЕТ</b>
+• Всего в юанях: {subtotal_cny + actual_comm_cny:.1f}¥
+• Курс: {client_rate}
+
+✅ <b>ИТОГО К ОПЛАТЕ: {final_total_amd:,} AMD</b>"""
+
+    # Формируем сообщение для админа
+    msg_admin = f"""💼 <b>ВНУТРЕННИЙ РАСЧЕТ: {client_name.upper()}</b>
+
+<b>РАСХОДЫ (Курс закупа: {real_rate}):</b>
+• Закупка товара: {purchase_cny:.1f}¥
+• Доставка по Китаю: {total_delivery_cny:.1f}¥
+Итого расход: <b>{real_expenses_amd:,} AMD</b>
+
+<b>ДОХОДЫ:</b>
+• Взяли с клиента: <b>{final_total_amd:,} AMD</b>
+• Комиссия в чеке: {actual_comm_amd:,} AMD
+
+💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {profit_amd:,} AMD</b>"""
+
+    keyboard = [
+        [InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')], 
+        [InlineKeyboardButton("📑 Отправить в Airtable", callback_data='export_airtable')]
+    ]
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg_client, parse_mode='HTML')
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     del user_sessions[user_id]
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ловим текстовые ответы (количество и цену доставки)"""
-    user_id = update.message.from_user.id
-    text = update.message.text.strip()
+# ====================================================================
+# EXCEL И AIRTABLE API (КНОПКИ)
+# ====================================================================
+async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
     
-    # Если бот не в режиме опроса, просто игнорируем текст
-    if user_id not in user_sessions or user_sessions[user_id].get("state") == "COLLECTING":
+    if user_id not in completed_orders:
+        await query.message.reply_text("❌ Заказ устарел или не найден в памяти.")
         return
+        
+    data = completed_orders[user_id]
+    
+    if query.data == 'gen_excel':
+        try:
+            items_data = []
+            for i, item in enumerate(data['items'], 1):
+                items_data.append({
+                    "№": i, 
+                    "Название товара": item['name'], 
+                    "Кол-во (шт)": item['qty'], 
+                    "Цена (¥)": item['client_price'], 
+                    "Логистика (¥)": float(item['shipping']), 
+                    "Итого (¥)": item['line_total']
+                })
+                
+            items_data.extend([
+                {"№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "", "Логистика (¥)": "", "Итого (¥)": ""},
+                {"№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "", "Логистика (¥)": "SUBTOTAL:", "Итого (¥)": f"{data['subtotal_cny']:.1f} ¥"},
+                {"№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "", "Логистика (¥)": "Комиссия:", "Итого (¥)": f"{data['actual_comm_cny']:.1f} ¥"},
+                {"№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "", "Логистика (¥)": "ИТОГО К ОПЛАТЕ:", "Итого (¥)": f"{data['final_total_amd']:,} AMD"}
+            ])
+            
+            df = pd.DataFrame(items_data)
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='Invoice')
+            output.seek(0)
+            
+            ts = datetime.now().strftime('%H%M%S')
+            filename = f"Invoice_{data['client']}_{ts}.xlsx"
+            await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(output, filename=filename))
+        except Exception as e:
+            await query.message.reply_text(f"❌ Ошибка Excel: {e}")
 
-    session = user_sessions[user_id]
-    idx = session["current_item_index"]
-    item = session["items"][idx]
+    elif query.data == 'export_airtable':
+        url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка"
+        headers = {
+            "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        # Интеграция по структуре Baza 2026
+        payload = {
+            "records": [
+                {
+                    "fields": {
+                        "Клиент": data["client"],
+                        "Сумма (¥)": data["subtotal_cny"],
+                        "Курс Клиент": data["client_rate"],
+                        "Курс Реал": data["real_rate"],
+                        "Прибыль (֏)": data["profit_amd"]
+                    }
+                }
+            ],
+            "typecast": True # Важно, если "Клиент" - это связь с другой таблицей
+        }
+        
+        try:
+            resp = requests.post(url, headers=headers, json=payload)
+            if resp.status_code in [200, 201]:
+                await query.message.reply_text("✅ Данные успешно записаны в базу Airtable!")
+            else:
+                await query.message.reply_text(f"❌ Ошибка от Airtable: {resp.text}")
+        except Exception as e:
+            await query.message.reply_text(f"❌ Сбой соединения: {e}")
 
-    if session["state"] == "ASKING_QTY":
-        item["qty"] = text # Сохраняем новую цифру
-        item["qty_confirmed"] = True
-        await ask_next_question(update, context, user_id)
-
-    elif session["state"] == "ASKING_SHIPPING":
-        item["shipping"] = text # Сохраняем цену доставки
-        session["current_item_index"] += 1 # Товар полностью готов, идем дальше
-        await ask_next_question(update, context, user_id)
-
-
-# --- ОСНОВНЫЕ КОМАНДЫ ---
-
+# ====================================================================
+# ТЕЛЕГРАМ ОБРАБОТЧИКИ
+# ====================================================================
 async def client_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.split()
-    if len(text) < 2:
-        await update.message.reply_text("❌ Напиши команду так: /client Peto1910")
-        return
-    client_name = text[1]
+    if len(text) < 2: return await update.message.reply_text("❌ Формат: /client Имя")
     user_id = update.message.from_user.id
-    
-    # Инициализируем новую структуру сессии
-    user_sessions[user_id] = {
-        "client": client_name, 
-        "orders": [],
-        "items": [],
-        "not_found_items": [],
-        "current_item_index": 0,
-        "state": "COLLECTING"
-    }
-    await update.message.reply_text(f"✅ Клиент {client_name} активирован!\nПересылай фото, в конце пиши /done")
+    user_sessions[user_id] = {"client": text[1], "orders": [], "items": [], "current_item_index": 0, "state": "COLLECTING"}
+    await update.message.reply_text(f"✅ Клиент {text[1]} активен. Жду фото.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    if user_id not in user_sessions or user_sessions[user_id].get("state") != "COLLECTING":
-        return
-        
-    photo = update.message.photo[-1]
-    file = await context.bot.get_file(photo.file_id)
-    photo_url = file.file_path
-    
-    qty = update.message.caption
-    if not qty: qty = "1"
-        
+    if user_id not in user_sessions or user_sessions[user_id].get("state") != "COLLECTING": return
+    photo_url = (await context.bot.get_file(update.message.photo[-1].file_id)).file_path
+    qty = update.message.caption or "1"
     user_sessions[user_id]["orders"].append({"photo_url": photo_url, "qty": qty})
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id not in user_sessions: return
+    session = user_sessions[user_id]
+    if session["state"] == "COLLECTING": return
+    text = update.message.text.strip()
+    idx = session["current_item_index"]
+    
+    if session["state"] == "ASKING_QTY":
+        session["items"][idx]["qty"] = text
+        session["items"][idx]["qty_confirmed"] = True
+    elif session["state"] == "ASKING_SHIPPING":
+        session["items"][idx]["shipping"] = text
+        session["current_item_index"] += 1
+    await ask_next_question(update, context, user_id)
 
 async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    if user_id not in user_sessions or not user_sessions[user_id]["orders"]:
-        await update.message.reply_text("❌ Нет сохраненных фотографий для обработки.")
-        return
-        
+    if user_id not in user_sessions or not user_sessions[user_id]["orders"]: return
     session = user_sessions[user_id]
-    client_name = session["client"]
-    orders = session["orders"]
+    msg = await update.message.reply_text("⏳ Kimi распознает фото...")
     
-    msg = await update.message.reply_text(f"⏳ Kimi распознает {len(orders)} фото. Ждем...")
+    catalog_text = get_client_catalog(session["client"])
+    recognized_ids = recognize_photos_batch(session["orders"], catalog_text)
     
-    catalog_text = get_client_catalog(client_name)
-    recognized_ids = recognize_photos_batch(orders, catalog_text)
-    
-    # Собираем успешные товары в список items
-    for order, recognized_id in zip(orders, recognized_ids):
-        qty = order["qty"]
-        
-        if recognized_id == "ERROR" or "ERROR" in recognized_id:
-            session["not_found_items"].append(f"Кол-во: {qty} (Ответ: '{recognized_id}')")
-            continue
-            
-        details = get_item_details(client_name, recognized_id)
+    for order, rec_id in zip(session["orders"], recognized_ids):
+        if "ERROR" in rec_id: continue
+        details = get_item_details(session["client"], rec_id)
         if details:
             session["items"].append({
-                "name": details['name'],
-                "client_price": details['client_price'],
-                "gs_price": details['gs_price'],
-                "size_weight": details['size_weight'],
-                "qty": qty,
-                "shipping": None,
-                "qty_confirmed": False # По умолчанию считаем не подтвержденным
+                "name": details['name'], "client_price": details['client_price'], 
+                "gs_price": details['gs_price'], "qty": order["qty"], 
+                "shipping": None, "qty_confirmed": False
             })
-        else:
-            session["not_found_items"].append(f"Кол-во: {qty} (Ответ: '{recognized_id}' - нет в базе)")
 
     await msg.edit_text("✅ Распознавание завершено! Уточняем детали...")
-    
-    # Запускаем цепочку вопросов
     await ask_next_question(update, context, user_id)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -297,6 +367,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("client", client_command))
     app.add_handler(CommandHandler("done", done_command))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)) # Слушатель ответов
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(export_handler))
     print("Бот успешно запущен!")
     app.run_polling()
