@@ -14,7 +14,7 @@ DATABASE_ID = os.getenv("DATABASE_ID")
 KIMI_TOKEN = os.getenv("KIMI_TOKEN")
 
 # Базы данных
-NOTION_CACHE_ID = "4547cbb7cbc54138a5ead9f942bd30dc" # Новая база для вечной памяти
+NOTION_CACHE_ID = "4547cbb7cbc54138a5ead9f942bd30dc" 
 AIRTABLE_TOKEN = "patD95Wp6hbmXnSH7.401bcf4ca42844c15f76c8361ddb7d5b7a4551d58c390de27ba3586fdd7d0cc7"
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
@@ -30,9 +30,7 @@ user_sessions = {}
 # NOTION CACHE (ВЕЧНАЯ ПАМЯТЬ)
 # ====================================================================
 def save_to_notion_cache(data, page_id=None):
-    """Сохраняем весь чек в Notion в виде JSON. Поддерживает перезапись (edit)."""
     json_str = json.dumps(data, ensure_ascii=False)
-    # Разбиваем длинный текст, так как лимит Notion - 2000 символов на блок
     chunks = [json_str[i:i+2000] for i in range(0, len(json_str), 2000)]
     rich_text_array = [{"text": {"content": chunk}} for chunk in chunks]
 
@@ -43,18 +41,17 @@ def save_to_notion_cache(data, page_id=None):
         }
     }
 
-    if page_id: # Если редактируем старый чек
+    if page_id:
         url = f"https://api.notion.com/v1/pages/{page_id}"
         requests.patch(url, headers=NOTION_HEADERS, json=payload)
         return page_id
-    else: # Если это новый чек
+    else:
         url = "https://api.notion.com/v1/pages"
         payload["parent"] = {"database_id": NOTION_CACHE_ID}
         response = requests.post(url, headers=NOTION_HEADERS, json=payload).json()
         return response["id"].replace("-", "")
 
 def get_from_notion_cache(page_id):
-    """Достаем чек из вечной памяти Notion"""
     url = f"https://api.notion.com/v1/pages/{page_id}"
     response = requests.get(url, headers=NOTION_HEADERS).json()
     rich_text_array = response["properties"]["Data_JSON"]["rich_text"]
@@ -63,7 +60,7 @@ def get_from_notion_cache(page_id):
 
 
 # ====================================================================
-# ФУНКЦИИ NOTION (КАТАЛОГ) И KIMI
+# ФУНКЦИИ NOTION И KIMI
 # ====================================================================
 def get_client_catalog(client_name):
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
@@ -77,7 +74,12 @@ def get_client_catalog(client_name):
             item_id = page["ID"]["title"][0]["plain_text"]
             name = page.get("Name", {}).get("rich_text", [])
             name_text = name[0]["plain_text"] if name else "Без названия"
-            catalog.append(f"ID: {item_id} | Название: {name_text}")
+            
+            # Читаем новую колонку "Описание" для подсказок Kimi
+            desc = page.get("Описание", {}).get("rich_text", [])
+            desc_text = f" (Визуально: {desc[0]['plain_text']})" if desc else ""
+            
+            catalog.append(f"ID: {item_id} | Название: {name_text}{desc_text}")
         except: continue
     return "\n".join(catalog)
 
@@ -112,7 +114,7 @@ def recognize_photos_batch(orders, catalog_text):
     
     num_photos = len(orders)
     prompt = (
-        f"Каталог:\n{catalog_text}\n\n"
+        f"Каталог (в скобках визуальные подсказки):\n{catalog_text}\n\n"
         f"Я отправляю {num_photos} фото. Сопоставь каждое с ID. "
         "Ответ СТРОГО в формате JSON: массив строк. Если нет - 'ERROR'. Пример: [\"1\", \"ERROR\"]."
     )
@@ -208,7 +210,6 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
         "profit_amd": profit_amd, "client_rate": client_rate, "real_rate": real_rate
     })
     
-    # МАГИЯ: Сохраняем в кэш Notion и получаем ID страницы
     new_page_id = save_to_notion_cache(session, page_id=page_id)
 
     msg_client = f"""<b>COMMERCIAL INVOICE: {client_name.upper()}</b>
@@ -240,7 +241,6 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
 
 💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {profit_amd:,} AMD</b>"""
 
-    # Кнопки привязаны к вечному ID из Notion
     keyboard = [
         [InlineKeyboardButton("✏️ Изменить товар", callback_data=f"edit_{new_page_id}")],
         [InlineKeyboardButton("📊 Excel Инвойс", callback_data=f"excel_{new_page_id}")], 
@@ -249,7 +249,7 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
 
     await context.bot.send_message(chat_id=update.effective_chat.id, text=msg_client, parse_mode='HTML')
     await context.bot.send_message(chat_id=update.effective_chat.id, text=msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
-    del user_sessions[user_id] # Очищаем оперативную память, всё надежно в Notion!
+    del user_sessions[user_id]
 
 
 # ====================================================================
@@ -261,25 +261,22 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     action, page_id = query.data.split("_", 1)
     
-    # 1. Логика кнопки "Изменить товар"
     if action == "edit":
         try:
             data = get_from_notion_cache(page_id)
-            data["page_id"] = page_id # Запоминаем, какой чек мы редактируем
+            data["page_id"] = page_id
             data["state"] = "WAITING_EDIT_NUM"
             user_sessions[user_id] = data
             await query.message.reply_text(f"✏️ Какой номер товара изменить? (от 1 до {len(data['items'])})\n👉 Напиши цифру:")
-        except Exception as e:
+        except:
             await query.message.reply_text("❌ Ошибка загрузки чека из памяти Notion.")
         return
 
-    # Загружаем данные для Excel и Airtable из вечной памяти
     try:
         data = get_from_notion_cache(page_id)
     except:
         return await query.message.reply_text("❌ Заказ удален из базы Notion.")
 
-    # 2. Логика кнопки "Excel"
     if action == 'excel':
         try:
             items_data = []
@@ -306,13 +303,10 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.message.reply_text(f"❌ Ошибка Excel: {e}")
 
-    # 3. Логика кнопки "Airtable"
-    # 3. Логика кнопки "Airtable"
     elif action == 'airtable':
         url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка"
         headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
         
-        # 1. Генерируем красивый текст чека для поля "Заказ"
         inv_lines = ""
         for i in data['items']:
             qty = int(i['qty'])
@@ -335,7 +329,6 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         invoice_text += f"• Курс: {data['client_rate']}\n\n"
         invoice_text += f"✅ ИТОГО К ОПЛАТЕ: {data['final_total_amd']:,} AMD"
 
-        # 2. Формируем отправку (Без Карго кода, с новым полем Заказ)
         payload = {
             "records": [{
                 "fields": {
@@ -389,18 +382,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             idx = int(text) - 1
             if 0 <= idx < len(session["items"]):
                 session["edit_item_index"] = idx
-                session["state"] = "WAITING_EDIT_QTY"
+                session["state"] = "WAITING_EDIT_ID"
                 item = session["items"][idx]
-                await update.message.reply_text(f"📦 Товар {idx+1}: {item['name']}\nТекущее количество: {item['qty']}\n👉 Напиши новое количество или отправь - (минус), чтобы не менять:")
+                await update.message.reply_text(f"📦 Товар {idx+1}: {item['name']}\n👉 Напиши правильный ID товара из базы, если Kimi ошибся, ИЛИ отправь - (минус), чтобы оставить этот:")
             else: await update.message.reply_text("❌ Неверный номер.")
         except: await update.message.reply_text("❌ Напиши просто цифру.")
+        return
+
+    if session["state"] == "WAITING_EDIT_ID":
+        idx = session["edit_item_index"]
+        if text != "-":
+            # Пользователь ввел новый ID вручную, идем в Notion
+            details = get_item_details(session["client"], text)
+            if details:
+                session["items"][idx]["name"] = details["name"]
+                session["items"][idx]["client_price"] = details["client_price"]
+                session["items"][idx]["gs_price"] = details["gs_price"]
+                await update.message.reply_text(f"✅ Товар успешно заменен на: {details['name']}")
+            else:
+                await update.message.reply_text("❌ ID не найден в базе. Оставляем старый товар.")
+        
+        session["state"] = "WAITING_EDIT_QTY"
+        item = session["items"][idx]
+        await update.message.reply_text(f"🔢 Текущее количество: {item['qty']}\n👉 Напиши новое количество или отправь - (минус):")
         return
 
     if session["state"] == "WAITING_EDIT_QTY":
         idx = session["edit_item_index"]
         if text != "-": session["items"][idx]["qty"] = text
         session["state"] = "WAITING_EDIT_SHIPPING"
-        await update.message.reply_text(f"🚚 Текущая доставка: {session['items'][idx]['shipping']}\n👉 Напиши новую доставку или отправь - (минус):")
+        await update.message.reply_text(f"🚚 Текущая доставка: {session['items'][idx].get('shipping', 0)}\n👉 Напиши новую доставку или отправь - (минус):")
         return
 
     if session["state"] == "WAITING_EDIT_SHIPPING":
