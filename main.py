@@ -1,5 +1,6 @@
 import os
 import requests
+import base64
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -76,7 +77,13 @@ def recognize_photo_with_kimi(photo_url, catalog_text):
         "Content-Type": "application/json"
     }
     
-    # СДЕЛАЛИ ПРОМПТ ОЧЕНЬ ЖЕСТКИМ
+    # 1. СКАЧИВАЕМ ФОТО НА СЕРВЕР И ПЕРЕВОДИМ В ТЕКСТ (Обход блокировок)
+    try:
+        image_data = requests.get(photo_url).content
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+    except Exception as e:
+        return f"Ошибка скачивания из Telegram: {e}"
+    
     prompt = (
         f"Вот список товаров:\n{catalog_text}\n\n"
         "Посмотри на фото и найди этот товар в списке. "
@@ -85,6 +92,7 @@ def recognize_photo_with_kimi(photo_url, catalog_text):
         "Если товара нет на фото, напиши слово ERROR"
     )
 
+    # 2. ОТПРАВЛЯЕМ ФОТО ПРЯМО В ЗАПРОСЕ (Base64)
     payload = {
         "model": "moonshot-v1-32k-vision-preview",
         "messages": [
@@ -92,19 +100,29 @@ def recognize_photo_with_kimi(photo_url, catalog_text):
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": photo_url}}
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_image}"
+                        }
+                    }
                 ]
             }
         ],
-        "temperature": 0.0 # Ноль фантазии, только факты
+        "temperature": 0.0
     }
     
     try:
         response = requests.post(url, headers=headers, json=payload).json()
+        
+        # Если Kimi вернул ошибку, выводим её текстом
+        if "error" in response:
+            return f"Ответ сервера: {response['error'].get('message', 'Неизвестная ошибка')}"
+            
         result_text = response["choices"][0]["message"]["content"].strip()
         return result_text
     except Exception as e:
-        return f"Ошибка API: {e}"
+        return f"Сбой скрипта: {e}"
 
 async def client_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.split()
@@ -150,7 +168,6 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("❌ В Notion нет товаров для этого клиента!")
         return
         
-    # ИЗМЕНИЛИ ШАПКУ НА /resultphoto
     result_text = "/resultphoto\n\n"
     result_text += f"Клиент: {client_name}\n\n"
     
@@ -162,8 +179,6 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_url = order["photo_url"]
         
         recognized_id = recognize_photo_with_kimi(photo_url, catalog_text)
-        
-        # Проверяем, что ответил Kimi
         details = get_item_details(client_name, recognized_id)
         
         if details:
@@ -176,7 +191,6 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result_text += f"Размеры: {details['size_weight']}\n\n"
             count += 1
         else:
-            # Сохраняем ТОЧНЫЙ ответ Kimi для диагностики
             not_found_items.append(f"Кол-во: {qty} (Ответ Kimi: '{recognized_id}')")
             
     result_text += "Курс клиенту: 58\nМой курс: 55\n\n"
