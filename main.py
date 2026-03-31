@@ -256,7 +256,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 d["current_item_index"] += 1
                 return await process_cargo_items(update, context, uid)
             
-            await update.message.reply_text("⏳ Читаю текст ИИ-Логистом...")
+        await update.message.reply_text("⏳ Читаю текст ИИ-Логистом...")
             res = parse_logistics_with_kimi(text, None)
             return await process_kimi_logistics_result(update, context, uid, res)
             
