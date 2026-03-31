@@ -237,6 +237,8 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
                 text += f"👉 <b>Это {full_boxes} полных коробок.</b> (Остаток: {rem} шт)\n"
             kb.append([InlineKeyboardButton("⚡️ Использовать базу", callback_data="cg_use_db")])
 
+        text += f"\n🇨🇳 Скопируй китайцу:\n`你好！我需要 {item['name']} {item['qty']}个。请问一整箱装多少个？一整箱的毛重是多少公斤？外箱尺寸是多少（长x宽x高）？`\n\n⏳ Перешли ответ сюда (текст/фото) или введи (Шт Вес Д Ш В).\n⏩ Пропустить: /next_product"
+
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=text,
@@ -348,16 +350,17 @@ async def generate_cargo_invoice(update: Update, context: ContextTypes.DEFAULT_T
     pid = save_to_notion_cache(d, page_id=d.get("page_id"))
     
     msg = (
-    f"🚛 <b>CARGO INVOICE: {d['client']}</b>\n\n"
-    f"<b>ПАРАМЕТРЫ:</b>\n"
-    f"• Вес: {d['t_weight']:.1f} кг\n" 
-    f"• Объем: {d['t_vol']:.2f} м³\n"
-    f"• Плотность: {d['density']} кг/м³\n\n"
-    f"<b>РАСЧЕТ:</b>\n"
-    f"• Логистика: ${cl_cost:.1f} (по ${d['tariff_cl']})\n\n"
-    f"✅ <b>К ОПЛАТЕ: {int(tot_amd):,} AMD</b>\n\n"
-)
+        f"🚛 <b>CARGO INVOICE: {d['client']}</b>\n\n"
+        f"<b>ПАРАМЕТРЫ:</b>\n"
+        f"• Вес: {d['t_weight']:.1f} кг\n"
+        f"• Объем: {d['t_vol']:.2f} м³\n"
+        f"• Плотность: {d['density']} кг/м³\n\n"
+        f"<b>РАСЧЕТ:</b>\n"
+        f"• Логистика: ${cl_cost:.1f} (по ${d['tariff_cl']})\n\n"
+        f"✅ <b>К ОПЛАТЕ: {int(tot_amd):,} AMD</b>\n\n"
+    )
     await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='HTML')
+
 
 # ====================================================================
 # ТЕЛЕГРАМ ОБРАБОТЧИКИ СООБЩЕНИЙ
@@ -411,7 +414,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else: is_manual = False
                 except: is_manual = False
             
-    if is_manual and boxes:
+            if is_manual and boxes:
                 idx = d["current_item_index"]
                 d["items"][idx]["boxes"] = boxes
                 d["items"][idx]["waiting_data"] = False
@@ -424,8 +427,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 res = parse_logistics_with_kimi(text, None, d["items"][idx]["qty"])
                 await process_kimi_logistics_result(update, context, uid, res)
                 return
-                
-       elif st == "CARGO_WAIT_TARIFF_CG":
+
+        elif st == "CARGO_WAIT_TARIFF_CG":
             try:
                 d["tariff_cg"] = float(text.replace(',', '.'))
                 d["state"] = "CARGO_WAIT_TARIFF_CL"
@@ -451,10 +454,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 t_cl = d['tariff_cl']
                 t_cg = d['tariff_cg']
                 r_amd = d['rate_usd_amd']
-                r_cny = 7.3 # Фиксированный курс юаня
+                r_cny = 7.3  # Фиксированный курс юаня
                 
                 delivery_cl = t_w * t_cl
-                pack_cost = 0.0 # Стоимость упаковки (пока 0, так как мы считали только вес)
+                pack_cost = 0.0  # Стоимость упаковки (пока 0)
                 
                 client_total_usd = delivery_cl + pack_cost
                 cargo_total_usd = (t_w * t_cg) + pack_cost
@@ -509,43 +512,103 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ Ошибка расчета: {e}")
             return
 
+    if uid in user_sessions:
+        s = user_sessions[uid]
+        st = s.get("state")
+
+        if st == "ASKING_QTY":
+            if text.isdigit():
+                s["items"][s["current_item_index"]]["qty"] = text
+                s["items"][s["current_item_index"]]["qty_confirmed"] = True
+                s["current_item_index"] += 1
+                await ask_next_question(update, context, uid)
+            else:
+                await update.message.reply_text("❌ Введи число.")
+
+        elif st == "ASKING_SHIPPING":
+            try:
+                s["items"][s["current_item_index"]]["shipping"] = float(text.replace(',', '.'))
+                s["current_item_index"] += 1
+                await ask_next_question(update, context, uid)
+            except:
+                await update.message.reply_text("❌ Введи число.")
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.message.from_user.id
+    if uid not in user_sessions:
+        await update.message.reply_text("❌ Сначала введи /client Имя")
+        return
+
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    caption = update.message.caption or ""
+    qty = "1"
+    if caption.strip().isdigit():
+        qty = caption.strip()
+
+    user_sessions[uid]["orders"].append({"photo_url": file.file_path, "qty": qty})
+    await update.message.reply_text(f"📸 Фото принято (кол-во: {qty}). Продолжай или нажми /done.")
+
+
+async def process_kimi_logistics_result(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, res):
+    if not res:
+        await update.message.reply_text("❌ ИИ не смог распознать. Введи вручную (Шт Вес Д Ш В):")
+        return
+
+    d = cargo_drafts[str(uid)]
+    idx = d["current_item_index"]
+    item = d["items"][idx]
+    qty = int(item["qty"])
+
+    pcs = int(res.get("pcs_per_ctn", 1))
+    gw = float(res.get("gw_kg", 0))
+    l = float(res.get("length", 0))
+    w = float(res.get("width", 0))
+    h = float(res.get("height", 0))
+
+    full_cartons = qty // pcs if pcs > 0 else 0
+    remainder = qty % pcs if pcs > 0 else qty
+
+    res["full_cartons"] = full_cartons
+    res["remainder"] = remainder
+    d["temp_kimi"] = res
+
+    msg = (
+        f"🤖 <b>ИИ-Логист распознал:</b>\n"
+        f"• В коробке: {pcs} шт\n"
+        f"• Вес брутто: {gw} кг\n"
+        f"• Габариты: {l}×{w}×{h} см\n\n"
+        f"📦 Итого коробок: {full_cartons} (остаток: {remainder} шт)"
+    )
+    kb = [
+        [InlineKeyboardButton("✅ Принять", callback_data="cg_accept_kimi")],
+        [InlineKeyboardButton("❌ Ввести вручную", callback_data="cg_reject_kimi")]
+    ]
+    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+
+
 # ====================================================================
 # CALLBACK HANDLER (КНОПКИ)
 # ====================================================================
-async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    draft = cargo_drafts[str(user_id)]
-    idx = draft.get("current_item_index", 0)
-    
-    # Пропускаем уже заполненные товары
-    while idx < len(draft["items"]) and ("boxes" in draft["items"][idx] and not draft["items"][idx].get("waiting_data")):
-        idx += 1
-        
-    draft["current_item_index"] = idx
-    if idx >= len(draft["items"]): 
-        return await finish_cargo_dims(update, context, user_id)
-    
-    item = draft["items"][idx]
-    
-    if "pack_type" not in item:
-        draft["state"] = "CARGO_WAIT_PACK"
-        kb = [[InlineKeyboardButton("📦 Мешок/Сборная (+0)", callback_data="pk_sack")], [InlineKeyboardButton("📐 Уголки (+1 кг)", callback_data="pk_corners")], [InlineKeyboardButton("🪵 Обрешетка (+10кг, +5см)", callback_data="pk_crate")]]
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📦 <b>Товар: {item['name']} ({item['qty']} шт)</b>\nКак будем упаковывать?", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
-        return
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data
+    uid = q.from_user.id
 
-    if "boxes" not in item or item.get("waiting_data"):
-        draft["state"] = "CARGO_WAIT_DIMS"
-        text = f"📐 <b>Габариты для: {item['name']} (Нужно {item['qty']} шт)</b>\n"
-        kb = []
-        
-        if item.get("pcs_ctn") and item.get("gw_kg") and item.get("cm"):
-            full_boxes = int(item['qty']) // item['pcs_ctn']
-            rem = int(item['qty']) % item['pcs_ctn']
-            text += f"\n⚡️ <b>Найдено в базе:</b>\n• В коробке: {item['pcs_ctn']} шт\n• Вес: {item['gw_kg']} кг | Габариты: {item['cm']}\n"
-            if full_boxes > 0: text += f"👉 <b>Это {full_boxes} полных коробок.</b> (Остаток: {rem} шт)\n"
-            kb.append([InlineKeyboardButton("⚡️ Использовать базу", callback_data="cg_use_db")])
-        
-        text += f"\n🇨🇳 Скопируй китайцу:\n`你好！我需要 {item['name']} {item['qty']}个。请问一整箱装多少个？一整箱的毛重是多少公斤？外箱尺寸是多少（长x宽x高）？`\n\n⏳ Перешли ответ сюда (текст/фото) или введи (Шт Вес Д Ш В).\n⏩ Пропустить: /next_product"
-        return await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb) if kb else None)
+    if data == "cg_indep_new":
+        cargo_drafts[str(uid)] = {"client": "", "items": [], "current_item_index": 0, "is_independent": True}
+        await q.message.reply_text("📝 Напиши имя клиента:")
+        cargo_drafts[str(uid)]["state"] = "CG_NEW_CLIENT"
+
+    elif data == "cg_resume_draft":
+        await q.message.reply_text("▶️ Продолжаем черновик...")
+        await process_cargo_items(update, context, uid)
+
+    elif data == "cg_indep_add":
+        cargo_drafts[str(uid)]["state"] = "CG_NEW_ITEM"
+        await q.message.reply_text("📦 Напиши название товара и количество (например: Конусы 350):")
 
     elif data == "cg_indep_calc":
         await finish_cargo_summary(update, context, uid)
@@ -583,7 +646,7 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
         i["waiting_data"] = False
         if rem > 0:
             d["state"] = "CARGO_WAIT_DIMS"
-            await q.message.reply_text(f"✅ {full} коробок добавлено из базы.\n⚠️ Осталось {rem} шт! Введи габариты остатка, или нажми /next product чтобы отложить:")
+            await q.message.reply_text(f"✅ {full} коробок добавлено из базы.\n⚠️ Осталось {rem} шт! Введи габариты остатка, или нажми /next_product чтобы отложить:")
         else:
             await q.message.reply_text("✅ Товар полностью рассчитан по базе.")
             d["current_item_index"] += 1
@@ -599,7 +662,7 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
         i["waiting_data"] = False
         if res["remainder"] > 0:
             d["state"] = "CARGO_WAIT_DIMS"
-            await q.message.reply_text(f"✅ Полные коробки в Карго и база Notion обновлена!\n⚠️ Осталось {res['remainder']} шт. Введи габариты остатка ИЛИ нажми /next product:")
+            await q.message.reply_text(f"✅ Полные коробки в Карго и база Notion обновлена!\n⚠️ Осталось {res['remainder']} шт. Введи габариты остатка ИЛИ нажми /next_product:")
         else:
             d["current_item_index"] += 1
             await process_cargo_items(update, context, uid)
@@ -642,6 +705,7 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
         }}], "typecast": True}
         resp = requests.post(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Логистика Карго", headers={"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}, json=payload)
         await q.message.reply_text("✅ Карго записано в Airtable!" if resp.status_code in [200, 201] else f"❌ Ошибка Airtable: {resp.text}")
+
 
 # ====================================================================
 # БАЗОВЫЕ КОМАНДЫ (СТАРТ, ФИНИШ, ОТМЕНА, ЧЕРНОВИКИ)
