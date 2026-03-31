@@ -257,8 +257,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return await process_cargo_items(update, context, uid)
             
         await update.message.reply_text("⏳ Читаю текст ИИ-Логистом...")
-            res = parse_logistics_with_kimi(text, None)
-            return await process_kimi_logistics_result(update, context, uid, res)
+        res = parse_logistics_with_kimi(text, None)
+        return await process_kimi_logistics_result(update, context, uid, res)
             
         elif st == "CARGO_WAIT_TARIFF_CG":
             try: d["tariff_cg"] = float(text.replace(',', '.')); d["state"] = "CARGO_WAIT_TARIFF_CL"; return await update.message.reply_text("👉 Тариф Клиенту ($/кг):")
