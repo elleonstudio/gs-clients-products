@@ -357,6 +357,7 @@ async def generate_cargo_invoice(update: Update, context: ContextTypes.DEFAULT_T
     f"• Логистика: ${cl_cost:.1f} (по ${d['tariff_cl']})\n\n"
     f"✅ <b>К ОПЛАТЕ: {int(tot_amd):,} AMD</b>\n\n"
 )
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='HTML')
 
 # ====================================================================
 # ТЕЛЕГРАМ ОБРАБОТЧИКИ СООБЩЕНИЙ
@@ -410,20 +411,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else: is_manual = False
                 except: is_manual = False
             
-       if is_manual and boxes:
-    idx = d["current_item_index"]
-    d["items"][idx]["boxes"] = boxes
-    d["items"][idx]["waiting_data"] = False
-    await update.message.reply_text("✅ Габариты приняты вручную!")
-    d["current_item_index"] += 1
-    return await process_cargo_items(update, context, uid)
-
-    await update.message.reply_text("⏳ Анализирую текст ИИ-Логистом...")
-    idx = d["current_item_index"]
-    res = parse_logistics_with_kimi(text, None, d["items"][idx]["qty"])
-    await process_kimi_logistics_result(update, context, uid, res)
-    return
-
+    if is_manual and boxes:
+                idx = d["current_item_index"]
+                d["items"][idx]["boxes"] = boxes
+                d["items"][idx]["waiting_data"] = False
+                await update.message.reply_text("✅ Габариты приняты вручную!")
+                d["current_item_index"] += 1
+                return await process_cargo_items(update, context, uid)
+            else:
+                await update.message.reply_text("⏳ Анализирую текст ИИ-Логистом...")
+                idx = d["current_item_index"]
+                res = parse_logistics_with_kimi(text, None, d["items"][idx]["qty"])
+                await process_kimi_logistics_result(update, context, uid, res)
+                return
+                
 elif st == "CARGO_WAIT_TARIFF_CG":
     try:
         d["tariff_cg"] = float(text.replace(',', '.'))
@@ -586,7 +587,7 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
         i = d["items"][d["current_item_index"]]
         full = int(i['qty']) // i['pcs_ctn']
         rem = int(i['qty']) % i['pcs_ctn']
-        dims = list(map(float, i["cm"].lower().replace("x", "х").split("х")))
+        dims = list(map(float, i["cm"].lower().replace("x", "х").replace("X", "х").split("х")))
         i["boxes"] = [{"qty": full, "w": i["gw_kg"], "l": dims[0], "w_dim": dims[1], "h": dims[2]}]
         i["waiting_data"] = False
         if rem > 0:
