@@ -25,7 +25,12 @@ def save_to_notion_cache(data, page_id=None):
     j_str = json.dumps(data, ensure_ascii=False)
     chunks = [j_str[i:i+2000] for i in range(0, len(j_str), 2000)]
     rt_arr = [{"text": {"content": c}} for c in chunks]
-    payload = {"properties": {"Order ID": {"title": [{"text": {"content": f"{data.get('client', 'CARGO')} - {datetime.now().strftime('%d.%m %H:%M')}"}}]}, "Data_JSON": {"rich_text": rt_arr}}}
+    payload = {
+        "properties": {
+            "Order ID": {"title": [{"text": {"content": f"{data.get('client', 'CARGO')} - {datetime.now().strftime('%d.%m %H:%M')}"}}]}, 
+            "Data_JSON": {"rich_text": rt_arr}
+        }
+    }
     
     if page_id:
         requests.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=NOTION_HEADERS, json=payload)
@@ -93,7 +98,7 @@ def recognize_photos_batch(orders, catalog_text):
     try: return json.loads(r["choices"][0]["message"]["content"].replace("```json", "").replace("```", "").strip())
     except: return ["ERROR"] * len(orders)
 
-def parse_logistics_with_kimi(text, photo_url):
+def parse_logistics_with_kimi(text, photo_url, qty):
     prompt = ("Ты логист. Вытащи из сообщения поставщика ТОЛЬКО данные для СТАНДАРТНОЙ ПОЛНОЙ коробки:\n"
               "1. Штук в 1 коробке (pcs_per_ctn)\n2. Вес брутто 1 коробки (gw_kg)\n3. Габариты (length, width, height)\n"
               "Верни СТРОГО JSON: {\"pcs_per_ctn\": 120, \"gw_kg\": 18.5, \"length\": 50, \"width\": 30, \"height\": 40} Без текста.")
@@ -158,115 +163,144 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
 # ====================================================================
 # МОДУЛЬ 2: КАРГО ЛОГИСТИКА
 # ====================================================================
-async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
-    d = cargo_drafts[str(uid)]
-    idx = d.get("current_item_index", 0)
+async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    draft = cargo_drafts[str(user_id)]
+    idx = draft.get("current_item_index", 0)
     
-    while idx < len(d["items"]) and ("boxes" in d["items"][idx] and not d["items"][idx].get("waiting_data")): idx += 1
-    d["current_item_index"] = idx
-    if idx >= len(d["items"]): return await finish_cargo_dims(update, context, uid)
+    while idx < len(draft["items"]) and ("boxes" in draft["items"][idx] and not draft["items"][idx].get("waiting_data")):
+        idx += 1
+        
+    draft["current_item_index"] = idx
+    if idx >= len(draft["items"]): 
+        return await finish_cargo_dims(update, context, user_id)
     
-    item = d["items"][idx]
+    item = draft["items"][idx]
+    
     if "pack_type" not in item:
-        d["state"] = "CARGO_WAIT_PACK"
+        draft["state"] = "CARGO_WAIT_PACK"
         kb = [[InlineKeyboardButton("📦 Мешок/Сборная (+0)", callback_data="pk_sack")], [InlineKeyboardButton("📐 Уголки (+1 кг)", callback_data="pk_corners")], [InlineKeyboardButton("🪵 Обрешетка (+10кг, +5см)", callback_data="pk_crate")]]
-        return await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📦 Товар: <b>{item['name']} ({item['qty']} шт)</b>\nУпаковка?", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📦 <b>Товар: {item['name']} ({item['qty']} шт)</b>\nКак будем упаковывать?", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+        return
 
     if "boxes" not in item or item.get("waiting_data"):
-        d["state"] = "CARGO_WAIT_DIMS"
-        text = f"📐 Габариты: <b>{item['name']} (Нужно {item['qty']} шт)</b>\n"
+        draft["state"] = "CARGO_WAIT_DIMS"
+        text = f"📐 <b>Габариты для: {item['name']} (Нужно {item['qty']} шт)</b>\n"
         kb = []
+        
         if item.get("pcs_ctn") and item.get("gw_kg") and item.get("cm"):
-            f_box = int(item['qty']) // item['pcs_ctn']
+            full_boxes = int(item['qty']) // item['pcs_ctn']
             rem = int(item['qty']) % item['pcs_ctn']
-            text += f"\n⚡️ В базе: {item['pcs_ctn']} шт/кор | {item['gw_kg']} кг | {item['cm']}\n👉 Это {f_box} полных кор. (Остаток: {rem} шт)\n"
+            text += f"\n⚡️ <b>Найдено в базе:</b>\n• В коробке: {item['pcs_ctn']} шт\n• Вес: {item['gw_kg']} кг | Габариты: {item['cm']}\n"
+            if full_boxes > 0: text += f"👉 <b>Это {full_boxes} полных коробок.</b> (Остаток: {rem} шт)\n"
             kb.append([InlineKeyboardButton("⚡️ Использовать базу", callback_data="cg_use_db")])
         
-        text += f"\n🇨🇳 Скопируй китайцу:\n`你好！我需要 {item['name']} {item['qty']}个。请问一整箱装多少个？一整箱的毛重是多少公斤？外箱尺寸是多少（长x宽x高）？`\n\n⏳ Перешли ответ сюда (текст/фото) или введи (Шт Вес Д Ш В).\n⏩ Пропустить: /next"
+        text += f"\n🇨🇳 Скопируй китайцу:\n`你好！我需要 {item['name']} {item['qty']}个。请问一整箱装多少个？一整箱的毛重是多少公斤？外箱尺寸是多少（长x宽x高）？`\n\n⏳ Перешли ответ сюда (текст/фото) или введи (Шт Вес Д Ш В).\n⏩ Пропустить: /next_product"
         return await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb) if kb else None)
 
-async def finish_cargo_dims(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
-    d = cargo_drafts[str(uid)]
-    waiting = [i['name'] for i in d["items"] if i.get("waiting_data")]
-    if waiting:
-        d["state"] = "CARGO_DRAFT_WAITING"
-        if "page_id" in d: save_to_notion_cache(d, page_id=d.get("page_id"))
-        return await context.bot.send_message(chat_id=update.effective_chat.id, text=f"💾 <b>ЧЕРНОВИК СОХРАНЕН</b>\nЖдем данные для: {', '.join(waiting)}\nВернуться: /cargo", parse_mode='HTML')
-
-    if d.get("is_independent"):
-        kb = [[InlineKeyboardButton("➕ Добавить товар", callback_data="cg_indep_add")], [InlineKeyboardButton("🧮 Итог", callback_data="cg_indep_calc")]]
-        return await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Добавлено! Дальше?", reply_markup=InlineKeyboardMarkup(kb))
-
-    t_w = t_v = t_p = 0
-    for i in d["items"]:
-        for b in i.get("boxes", []):
-            q, w, l, wd, h = b["qty"], b["w"], b["l"], b["w_dim"], b["h"]
-            if i.get("pack_type") in ["crate", "pk_crate"]: w += 10; l += 5; wd += 5; h += 5
+async def finish_cargo_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    draft = cargo_drafts[str(user_id)]
+    t_weight = t_vol = t_pieces = 0
+    for i in draft["items"]:
+        for box in i.get("boxes", []):
+            qty, w, l, w_dim, h = box["qty"], box["w"], box["l"], box["w_dim"], box["h"]
+            if i.get("pack_type") in ["crate", "pk_crate"]: w += 10; l += 5; w_dim += 5; h += 5
             elif i.get("pack_type") in ["corners", "pk_corners"]: w += 1
-            t_p += q; t_w += (w * q); t_v += ((l * wd * h) / 1000000) * q
+            t_pieces += qty; t_weight += (w * qty); t_vol += ((l * w_dim * h) / 1000000) * qty
             
-    d.update({"t_weight": t_w, "t_vol": t_v, "t_pieces": t_p, "density": int(t_w/t_v) if t_v > 0 else 0})
-    if "page_id" in d: save_to_notion_cache(d, page_id=d.get("page_id"))
-    d["state"] = "CARGO_WAIT_TARIFF_CG"
-    msg = f"📊 <b>СВОДКА:</b>\nВес: {t_w:.1f} кг | Объем: {t_v:.2f} м³ | Мест: {t_p} | Плотность: <b>{d['density']}</b>\n👉 Тариф Карго ($/кг):"
+    draft.update({"t_weight": t_weight, "t_vol": t_vol, "t_pieces": t_pieces, "density": int(t_weight/t_vol) if t_vol > 0 else 0})
+    if "page_id" in draft: save_to_notion_cache(draft, page_id=draft.get("page_id"))
+    
+    draft["state"] = "CARGO_WAIT_TARIFF_CG"
+    msg = f"📊 <b>ФИНАЛЬНАЯ СВОДКА КАРГО:</b>\n• Вес: {t_weight:.1f} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces}\n• Плотность: <b>{draft['density']} кг/м³</b>\n\n👉 Напиши Тариф Карго ($/кг):"
     
     if update.callback_query: await update.callback_query.message.reply_text(msg, parse_mode='HTML')
     else: await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='HTML')
 
+async def finish_cargo_dims(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    draft = cargo_drafts[str(user_id)]
+    
+    waiting = [i['name'] for i in draft["items"] if i.get("waiting_data")]
+    if waiting:
+        draft["state"] = "CARGO_DRAFT_WAITING"
+        if "page_id" in draft: save_to_notion_cache(draft, page_id=draft.get("page_id"))
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"💾 <b>СВОДКА КАРГО (Черновик)</b>\n⚠️ Ожидаем габариты от поставщика для:\n— {', '.join(waiting)}\n\n⏳ <i>Когда китаец ответит, нажми <b>/cargo</b> чтобы продолжить!</i>", parse_mode='HTML')
+        return
+
+    if draft.get("is_independent"):
+        kb = [[InlineKeyboardButton("➕ Добавить еще товар", callback_data="cg_indep_add")], [InlineKeyboardButton("🧮 Рассчитать итог", callback_data="cg_indep_calc")]]
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Товар добавлен!\nЧто делаем дальше?", reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    await finish_cargo_summary(update, context, user_id)
+
 # ====================================================================
 # ТЕЛЕГРАМ ОБРАБОТЧИКИ СООБЩЕНИЙ
 # ====================================================================
+async def process_skip_product(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
+    if str(uid) in cargo_drafts and cargo_drafts[str(uid)].get("state") == "CARGO_WAIT_DIMS":
+        d = cargo_drafts[str(uid)]
+        idx = d["current_item_index"]
+        d["items"][idx]["boxes"] = []
+        d["items"][idx]["waiting_data"] = True
+        d["current_item_index"] += 1
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="⏭ Товар отложен в черновик. Переходим к следующему.")
+        await process_cargo_items(update, context, uid)
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
     text = update.message.text.strip()
-    if text.lower() == "/next":
-        if str(uid) in cargo_drafts and cargo_drafts[str(uid)].get("state") == "CARGO_WAIT_DIMS":
-            cargo_drafts[str(uid)]["items"][cargo_drafts[str(uid)]["current_item_index"]]["waiting_data"] = True
-            cargo_drafts[str(uid)]["current_item_index"] += 1
-            await update.message.reply_text("⏭ Отложено в черновик.")
-            return await process_cargo_items(update, context, uid)
+    text_lower = text.lower()
+
+    if text_lower in ["/next product", "/next_product"]:
+        return await process_skip_product(update, context, uid)
 
     if str(uid) in cargo_drafts:
         d = cargo_drafts[str(uid)]
         st = d.get("state")
         
         if st == "CG_NEW_CLIENT":
-            d["client"] = text; d["state"] = "CG_NEW_ITEM"
-            return await update.message.reply_text("📦 Название и кол-во (Конусы 350):")
+            d["client"] = text
+            d["state"] = "CG_NEW_ITEM"
+            await update.message.reply_text("📦 Напиши название товара и количество (например: Конусы 350):")
+            return
             
         elif st == "CG_NEW_ITEM":
-            pts = text.split()
-            qty, name = ("1", text) if not pts[-1].isdigit() else (pts[-1], " ".join(pts[:-1]))
+            parts = text.split()
+            qty, name = ("1", text) if not parts[-1].isdigit() else (parts[-1], " ".join(parts[:-1]))
             d["items"].append({"name": name, "qty": qty})
-            return await process_cargo_items(update, context, uid)
+            await process_cargo_items(update, context, uid)
+            return
 
         elif st == "CARGO_WAIT_DIMS":
-            is_m, boxes = True, []
+            is_manual, boxes = True, []
             for line in text.split('\n'):
                 if not line.strip(): continue
                 try:
-                    p = list(map(float, line.replace(',', '.').split()))
-                    if len(p) == 5: boxes.append({"qty": int(p[0]), "w": p[1], "l": p[2], "w_dim": p[3], "h": p[4]})
-                    else: is_m = False
-                except: is_m = False
+                    parts = list(map(float, line.replace(',', '.').split()))
+                    if len(parts) == 5: boxes.append({"qty": int(parts[0]), "w": parts[1], "l": parts[2], "w_dim": parts[3], "h": parts[4]})
+                    else: is_manual = False
+                except: is_manual = False
             
-        if is_m and boxes:
-                d["items"][d["current_item_index"]]["boxes"] = boxes
-                d["items"][d["current_item_index"]]["waiting_data"] = False
+            if is_manual and boxes:
+                idx = d["current_item_index"]
+                d["items"][idx]["boxes"] = boxes
+                d["items"][idx]["waiting_data"] = False
+                await update.message.reply_text("✅ Габариты приняты вручную!")
                 d["current_item_index"] += 1
                 return await process_cargo_items(update, context, uid)
-            
-        await update.message.reply_text("⏳ Читаю текст ИИ-Логистом...")
-        res = parse_logistics_with_kimi(text, None)
-        return await process_kimi_logistics_result(update, context, uid, res)
+            else:
+                await update.message.reply_text("⏳ Анализирую текст ИИ-Логистом...")
+                idx = d["current_item_index"]
+                res = parse_logistics_with_kimi(text, None, d["items"][idx]["qty"])
+                await process_kimi_logistics_result(update, context, uid, res)
+                return
             
         elif st == "CARGO_WAIT_TARIFF_CG":
             try:
                 d["tariff_cg"] = float(text.replace(',', '.'))
                 d["state"] = "CARGO_WAIT_TARIFF_CL"
-                await update.message.reply_text("👉 Тариф Клиенту ($/кг):")
-            except:
-                await update.message.reply_text("❌ Введи число.")
+                await update.message.reply_text("👉 Напиши Тариф Клиенту ($/кг):")
+            except: await update.message.reply_text("❌ Введи число.")
             return
             
         elif st == "CARGO_WAIT_TARIFF_CL":
@@ -279,19 +313,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif st == "CARGO_WAIT_RATE_AMD":
             try:
                 d["rate_usd_amd"] = float(text.replace(',', '.'))
-                
-                # Математика для чека
                 t_w = d['t_weight']
                 t_v = d['t_vol']
                 t_p = d['t_pieces']
                 t_cl = d['tariff_cl']
                 t_cg = d['tariff_cg']
                 r_amd = d['rate_usd_amd']
-                r_cny = 7.3 # Фиксированный курс юаня
+                r_cny = 7.3 
                 
                 delivery_cl = t_w * t_cl
-                pack_cost = 0.0 # Стоимость упаковки (пока 0, так как мы считали только вес)
-                
+                pack_cost = 0.0 
                 client_total_usd = delivery_cl + pack_cost
                 cargo_total_usd = (t_w * t_cg) + pack_cost
                 
@@ -299,14 +330,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tot_amd = int(client_total_usd * r_amd)
                 net_profit = int((client_total_usd - cargo_total_usd) * r_amd)
                 
-                d.update({
-                    "tot_amd": tot_amd, 
-                    "cg_cny": cargo_total_cny, 
-                    "net_profit": net_profit
-                })
+                d.update({"tot_amd": tot_amd, "cg_cny": cargo_total_cny, "net_profit": net_profit})
                 pid = save_to_notion_cache(d, page_id=d.get("page_id"))
                 
-                # СООБЩЕНИЕ 1 (КЛИЕНТ)
                 msg_client = f"""🚛 <b>CARGO INVOICE: {d.get('client', 'CLIENT').upper()}</b>
 
 <b>ПАРАМЕТРЫ ГРУЗА:</b>
@@ -322,7 +348,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔄 Конвертация: ${client_total_usd:.1f} × {r_cny} ¥ × {r_amd} AMD
 ✅ <b>К ОПЛАТЕ: {tot_amd:,} AMD</b>"""
 
-                # СООБЩЕНИЕ 2 (АДМИН)
                 msg_admin = f"""💼 <b>ВНУТРЕННИЙ РАСЧЕТ (CARGO-{str(uid)[-4:]}):</b>
 
 <b>1. ОТДАЕМ В КАРГО:</b>
@@ -332,23 +357,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>2. ПРИБЫЛЬ:</b>
 💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {net_profit:,} AMD</b>"""
 
-                kb = [
-                    [InlineKeyboardButton("📊 Excel Карго", callback_data=f"cgexcel_{pid}")],
-                    [InlineKeyboardButton("📑 В Airtable", callback_data=f"cargodb_{pid}")]
-                ]
+                kb = [[InlineKeyboardButton("📊 Excel Карго", callback_data=f"cgexcel_{pid}")],
+                      [InlineKeyboardButton("📑 В Airtable", callback_data=f"cargodb_{pid}")]]
                 
                 await update.message.reply_text(msg_client, parse_mode='HTML')
                 await update.message.reply_text(msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
-                
                 del cargo_drafts[str(uid)]
             except Exception as e: 
                 await update.message.reply_text(f"❌ Ошибка расчета: {e}")
             return
+
     if uid in user_sessions and user_sessions[uid]["state"] != "COLLECTING":
         s = user_sessions[uid]
         idx = s.get("current_item_index", 0)
-        if s["state"] == "ASKING_QTY": s["items"][idx]["qty"] = text; s["items"][idx]["qty_confirmed"] = True
-        elif s["state"] == "ASKING_SHIPPING": s["items"][idx]["shipping"] = text; s["current_item_index"] += 1
+        if s["state"] == "ASKING_QTY": 
+            s["items"][idx]["qty"] = text
+            s["items"][idx]["qty_confirmed"] = True
+        elif s["state"] == "ASKING_SHIPPING": 
+            s["items"][idx]["shipping"] = text
+            s["current_item_index"] += 1
         await ask_next_question(update, context, uid)
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -357,7 +384,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if str(uid) in cargo_drafts and cargo_drafts[str(uid)].get("state") == "CARGO_WAIT_DIMS":
         await update.message.reply_text("⏳ Читаю скриншот ИИ-Логистом...")
-        res = parse_logistics_with_kimi(update.message.caption, url)
+        res = parse_logistics_with_kimi(update.message.caption, url, cargo_drafts[str(uid)]["items"][cargo_drafts[str(uid)]["current_item_index"]]["qty"])
         return await process_kimi_logistics_result(update, context, uid, res)
 
     if uid in user_sessions and user_sessions[uid].get("state") == "COLLECTING":
@@ -368,9 +395,7 @@ async def process_kimi_logistics_result(update: Update, context: ContextTypes.DE
     item = d["items"][d["current_item_index"]]
     if not res: return await update.message.reply_text("❌ ИИ не понял. Введи вручную (Коробок Вес Д Ш В):")
     
-    # Питоновская математика (надежная)
-    pcs = int(res.get('pcs_per_ctn', 1))
-    if pcs == 0: pcs = 1
+    pcs = int(res.get('pcs_per_ctn', 1)) or 1
     t_qty = int(item['qty'])
     res['full_cartons'] = t_qty // pcs
     res['remainder'] = t_qty % pcs
@@ -397,11 +422,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "cg_resume_draft":
         d = cargo_drafts[str(uid)]
         for i in d["items"]:
-            if i.get("waiting_data"): i.pop("waiting_data", None); i.pop("boxes", None)
-        idx = 0
-        while idx < len(d["items"]) and "boxes" in d["items"][idx]: idx += 1
-        d["current_item_index"] = idx
-        await q.message.edit_text(f"📂 Возврат к черновику {d.get('client', '')}...")
+            if i.get("waiting_data"): 
+                i.pop("waiting_data", None)
+                i.pop("boxes", None)
+        d["current_item_index"] = 0
+        await q.message.edit_text(f"📂 Возвращаемся к черновику {d.get('client')}...")
         await process_cargo_items(update, context, uid)
 
     elif data == "cg_indep_new":
@@ -413,23 +438,55 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.edit_text("📦 Товар и кол-во (Конусы 350):")
 
     elif data == "cg_indep_calc":
-        await finish_cargo_dims(update, context, uid)
+        await finish_cargo_summary(update, context, uid)
 
-    elif data.startswith("airtable_"):
+    elif data.startswith("cgexcel_"):
         pid = data.split("_")[1]
-        try: d = get_from_notion_cache(pid)
-        except: return await q.message.reply_text("❌ Чек удален.")
-        inv = f"COMMERCIAL INVOICE: {d['client']}\n" + "".join([f"• {i['name']}: {i['qty']} шт\n" for i in d['items']]) + f"\nИТОГО: {d['final_total_amd']} AMD"
-        resp = requests.post(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка", headers={"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}, json={"records": [{"fields": {"Клиент": d["client"], "Сумма (¥)": d["subtotal_cny"], "Курс Клиент": d["client_rate"], "Курс Реал": d["real_rate"], "Реал Цена Закупки (¥)": d["purchase_cny"], "Заказ": inv}}], "typecast": True})
-        await q.message.reply_text("✅ В Airtable!" if resp.status_code in [200, 201] else f"❌ Ошибка Airtable: {resp.text}")
+        try:
+            d = get_from_notion_cache(pid)
+            items_data = []
+            for i, item in enumerate(d['items'], 1):
+                pack_str = "Обрешетка" if item.get('pack_type') in ['crate', 'pk_crate'] else ("Уголки" if item.get('pack_type') in ['corners', 'pk_corners'] else "Мешок/Сборная")
+                items_data.append({"№": i, "Название": item['name'], "Кол-во (шт)": item['qty'], "Упаковка": pack_str})
+            
+            items_data.extend([
+                {"№": "", "Название": "", "Кол-во (шт)": "", "Упаковка": ""},
+                {"№": "", "Название": "ИТОГОВЫЙ ВЕС", "Кол-во (шт)": f"{d['t_weight']:.1f} кг", "Упаковка": ""},
+                {"№": "", "Название": "ИТОГОВЫЙ ОБЪЕМ", "Кол-во (шт)": f"{d['t_vol']:.2f} м³", "Упаковка": ""},
+                {"№": "", "Название": "ИТОГО К ОПЛАТЕ", "Кол-во (шт)": f"{d['tot_amd']:,} AMD", "Упаковка": ""}
+            ])
+            
+            df = pd.DataFrame(items_data)
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='Cargo Invoice')
+            output.seek(0)
+            await context.bot.send_document(chat_id=q.message.chat_id, document=InputFile(output, filename=f"Cargo_{d.get('client', 'Order')}.xlsx"))
+        except: await q.message.reply_text("❌ Ошибка генерации Excel.")
+
+    elif data.startswith("cargodb_"):
+        pid = data.split("_")[1]
+        try:
+            d = get_from_notion_cache(pid)
+            payload = {"records": [{"fields": {
+                "Party_ID": f"CARGO-{str(uid)[-4:]}-{datetime.now().strftime('%M%S')}",
+                "Total_Weight_KG": float(d["t_weight"]), "Total_Volume_CBM": float(d["t_vol"]),
+                "Density": int(d["density"]), "Tariff_Cargo_USD": float(d["tariff_cg"]),
+                "Tariff_Client_USD": float(d["tariff_cl"]), "Total_Client_AMD": d["tot_amd"],
+                "Total_Cargo_CNY": d["cg_cny"], "Net_Profit_AMD": d["net_profit"]
+            }}], "typecast": True}
+            requests.post(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Логистика Карго", headers={"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}, json=payload)
+            await q.message.reply_text("✅ Карго записано в Airtable!")
+        except: await q.message.reply_text("❌ Ошибка записи в Airtable.")
 
     elif data.startswith("tocargo_"):
         pid = data.split("_")[1]
-        try: d = get_from_notion_cache(pid)
-        except: return await q.message.reply_text("❌ Чек удален.")
-        cargo_drafts[str(uid)] = {"client": d["client"], "page_id": pid, "items": d["items"], "current_item_index": 0}
-        await q.message.reply_text(f"🚀 Карго для {d['client']}")
-        await process_cargo_items(update, context, uid)
+        try:
+            d = get_from_notion_cache(pid)
+            cargo_drafts[str(uid)] = {"client": d["client"], "page_id": pid, "items": d["items"], "current_item_index": 0}
+            await q.message.reply_text(f"🚀 Карго для {d['client']}")
+            await process_cargo_items(update, context, uid)
+        except: await q.message.reply_text("❌ Ошибка загрузки.")
 
     elif data.startswith("pk_"):
         cargo_drafts[str(uid)]["items"][cargo_drafts[str(uid)]["current_item_index"]]["pack_type"] = data.split("_")[1]
@@ -444,7 +501,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         i["waiting_data"] = False
         if rem > 0:
             d["state"] = "CARGO_WAIT_DIMS"
-            await q.message.reply_text(f"✅ База: {f_box} кор.\n⚠️ Остаток: {rem} шт! Введи габариты или жми /next:")
+            await q.message.reply_text(f"✅ База: {f_box} кор.\n⚠️ Остаток: {rem} шт! Введи габариты.")
         else:
             d["current_item_index"] += 1
             await process_cargo_items(update, context, uid)
@@ -459,46 +516,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         i["waiting_data"] = False
         if r["remainder"] > 0:
             d["state"] = "CARGO_WAIT_DIMS"
-            await q.message.reply_text(f"✅ Сохранено!\n⚠️ Остаток: {r['remainder']} шт. Введи габариты ИЛИ нажми /next:")
+            await q.message.reply_text(f"✅ Сохранено!\n⚠️ Остаток: {r['remainder']} шт. Введи габариты.")
         else:
             d["current_item_index"] += 1
             await process_cargo_items(update, context, uid)
             
     elif data == "cg_reject_kimi":
         cargo_drafts[str(uid)]["state"] = "CARGO_WAIT_DIMS"
-        await q.message.reply_text("❌ Окей, введи (Штук Вес Д Ш В):")
-            
-    elif data.startswith("cargodb_"):
-        pid = data.split("_")[1]
-        d = get_from_notion_cache(pid)
-        payload = {"records": [{"fields": {
-            "Party_ID": f"CG-{str(uid)[-4:]}-{datetime.now().strftime('%M%S')}", "Total_Weight_KG": float(d["t_weight"]), "Total_Volume_CBM": float(d["t_vol"]),
-            "Density": int(d["density"]), "Tariff_Cargo_USD": float(d["tariff_cg"]), "Tariff_Client_USD": float(d["tariff_cl"]),
-            "Total_Client_AMD": d["tot_amd"], "Total_Cargo_CNY": d["cg_cny"], "Net_Profit_AMD": d["net_profit"]
-        }}], "typecast": True}
-        resp = requests.post(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Логистика Карго", headers={"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}, json=payload)
-        await q.message.reply_text("✅ В Airtable!" if resp.status_code in [200, 201] else f"❌ Ошибка Airtable: {resp.text}")
-
-    elif data.startswith("cgexcel_"):
-        pid = data.split("_")[1]
-        try: d = get_from_notion_cache(pid)
-        except: return await q.message.reply_text("❌ Чек удален.")
-        items_data = []
-        for i, item in enumerate(d['items'], 1):
-            pack_str = "Обрешетка" if item.get('pack_type') in ['crate', 'pk_crate'] else ("Уголки" if item.get('pack_type') in ['corners', 'pk_corners'] else "Мешок/Сборная")
-            items_data.append({"№": i, "Название": item['name'], "Кол-во (шт)": item['qty'], "Упаковка": pack_str})
-        items_data.extend([
-            {"№": "", "Название": "", "Кол-во (шт)": "", "Упаковка": ""},
-            {"№": "", "Название": "ИТОГОВЫЙ ВЕС", "Кол-во (шт)": f"{d['t_weight']:.1f} кг", "Упаковка": ""},
-            {"№": "", "Название": "ИТОГОВЫЙ ОБЪЕМ", "Кол-во (шт)": f"{d['t_vol']:.2f} м³", "Упаковка": ""},
-            {"№": "", "Название": "ИТОГО К ОПЛАТЕ", "Кол-во (шт)": f"{d['tot_amd']:,} AMD", "Упаковка": ""}
-        ])
-        df = pd.DataFrame(items_data)
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Cargo Invoice')
-        output.seek(0)
-        await context.bot.send_document(chat_id=q.message.chat_id, document=InputFile(output, filename=f"Cargo_{d.get('client', 'Order')}.xlsx"))
+        await q.message.reply_text("❌ Окей, введи вручную.")
 
 # ====================================================================
 # БАЗОВЫЕ КОМАНДЫ
@@ -513,14 +538,12 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid not in user_sessions or not user_sessions[uid].get("orders"): return
     s = user_sessions[uid]
     msg = await update.message.reply_text("⏳ Читаю фото...")
-    
     r_ids = recognize_photos_batch(s["orders"], get_client_catalog(s["client"]))
     for o, rid in zip(s["orders"], r_ids):
         if "ERROR" in rid: continue
         det = get_item_details(s["client"], rid)
         if det: s["items"].append({"name": det['name'], "client_price": det['client_price'], "gs_price": det['gs_price'], "qty": o["qty"], "shipping": None, "page_id": det["page_id"], "pcs_ctn": det["pcs_ctn"], "gw_kg": det["gw_kg"], "cm": det["cm"]})
-
-    if not s["items"]: return await msg.edit_text("❌ ОШИБКА: Kimi не понял фото. Проверь клиента.")
+    if not s["items"]: return await msg.edit_text("❌ ОШИБКА: Kimi не понял фото.")
     await msg.edit_text("✅ Уточняем детали...")
     await ask_next_question(update, context, uid)
 
@@ -530,7 +553,7 @@ async def cargo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid in cargo_drafts:
         d = cargo_drafts[uid]
         waiting = [i['name'] for i in d.get("items", []) if i.get("waiting_data") or "boxes" not in i]
-        if waiting: kb.insert(0, [InlineKeyboardButton(f"📂 Черновик: {d.get('client', 'Без имени')} (Ждет: {', '.join(waiting)})", callback_data="cg_resume_draft")])
+        if waiting: kb.insert(0, [InlineKeyboardButton(f"📂 Черновик: {d.get('client', 'Без имени')}", callback_data="cg_resume_draft")])
     await update.message.reply_text("📦 Меню Карго:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
