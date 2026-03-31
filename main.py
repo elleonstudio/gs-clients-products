@@ -425,15 +425,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await process_kimi_logistics_result(update, context, uid, res)
                 return
                 
-elif st == "CARGO_WAIT_TARIFF_CG":
-    try:
-        d["tariff_cg"] = float(text.replace(',', '.'))
-        d["state"] = "CARGO_WAIT_TARIFF_CL"
-        await update.message.reply_text("👉 Напиши Тариф Клиенту ($/кг):")
-    except:
-        await update.message.reply_text("❌ Введи число.")
-    return
-            
        elif st == "CARGO_WAIT_TARIFF_CG":
             try:
                 d["tariff_cg"] = float(text.replace(',', '.'))
