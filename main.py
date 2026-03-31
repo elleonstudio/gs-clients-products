@@ -264,9 +264,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 d["tariff_cg"] = float(text.replace(',', '.'))
                 d["state"] = "CARGO_WAIT_TARIFF_CL"
-                return await update.message.reply_text("👉 Тариф Клиенту ($/кг):")
+                await update.message.reply_text("👉 Тариф Клиенту ($/кг):")
             except:
-                return await update.message.reply_text("❌ Введи число.")
+                await update.message.reply_text("❌ Введи число.")
+            return
             
         elif st == "CARGO_WAIT_TARIFF_CL":
             try:
