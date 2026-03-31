@@ -190,6 +190,7 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
 # ====================================================================
 # МОДУЛЬ 2: КАРГО ЛОГИСТИКА
 # ====================================================================
+
 async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     draft = cargo_drafts[str(user_id)]
     idx = draft.get("current_item_index", 0)
@@ -199,14 +200,24 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
         idx += 1
         
     draft["current_item_index"] = idx
-    if idx >= len(draft["items"]): return await finish_cargo_dims(update, context, user_id)
+    if idx >= len(draft["items"]):
+        return await finish_cargo_dims(update, context, user_id)
     
     item = draft["items"][idx]
     
     if "pack_type" not in item:
         draft["state"] = "CARGO_WAIT_PACK"
-        kb = [[InlineKeyboardButton("📦 Мешок/Сборная (+0)", callback_data="pk_sack")], [InlineKeyboardButton("📐 Уголки (+1 кг)", callback_data="pk_corners")], [InlineKeyboardButton("🪵 Обрешетка (+10кг, +5см)", callback_data="pk_crate")]]
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📦 <b>Товар: {item['name']} ({item['qty']} шт)</b>\nКак будем упаковывать?", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+        kb = [
+            [InlineKeyboardButton("📦 Мешок/Сборная (+0)", callback_data="pk_sack")],
+            [InlineKeyboardButton("📐 Уголки (+1 кг)", callback_data="pk_corners")],
+            [InlineKeyboardButton("🪵 Обрешетка (+10кг, +5см)", callback_data="pk_crate")]
+        ]
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"📦 <b>Товар: {item['name']} ({item['qty']} шт)</b>\nКак будем упаковывать?",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
         return
 
     if "boxes" not in item or item.get("waiting_data"):
@@ -217,13 +228,26 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
         if item.get("pcs_ctn") and item.get("gw_kg") and item.get("cm"):
             full_boxes = int(item['qty']) // item['pcs_ctn']
             rem = int(item['qty']) % item['pcs_ctn']
-            text += f"\n⚡️ <b>Найдено в базе:</b>\n• В коробке: {item['pcs_ctn']} шт\n• Вес: {item['gw_kg']} кг | Габариты: {item['cm']}\n"
-            if full_boxes > 0: text += f"👉 <b>Это {full_boxes} полных коробок.</b> (Остаток: {rem} шт)\n"
+            text += (
+                f"\n⚡️ <b>Найдено в базе:</b>\n"
+                f"• В коробке: {item['pcs_ctn']} шт\n"
+                f"• Вес: {item['gw_kg']} кг | Габариты: {item['cm']}\n"
+            )
+            if full_boxes > 0:
+                text += f"👉 <b>Это {full_boxes} полных коробок.</b> (Остаток: {rem} шт)\n"
             kb.append([InlineKeyboardButton("⚡️ Использовать базу", callback_data="cg_use_db")])
-        
-      def build_text(item):
-    text = ""
-    text += (
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(kb) if kb else None
+        )
+        return
+
+
+def build_text(item):
+    text = (
         f"\n🇨🇳 Скопируй китайцу:\n"
         f"`你好！我需要 {item['name']} {item['qty']}个。"
         f"请问一整箱装多少个？一整箱的毛重是多少公斤？"
@@ -240,18 +264,38 @@ async def finish_cargo_summary(update: Update, context: ContextTypes.DEFAULT_TYP
     for i in draft["items"]:
         for box in i.get("boxes", []):
             qty, w, l, w_dim, h = box["qty"], box["w"], box["l"], box["w_dim"], box["h"]
-            if i.get("pack_type") in ["crate", "pk_crate"]: w += 10; l += 5; w_dim += 5; h += 5
-            elif i.get("pack_type") in ["corners", "pk_corners"]: w += 1
-            t_pieces += qty; t_weight += (w * qty); t_vol += ((l * w_dim * h) / 1000000) * qty
+            if i.get("pack_type") in ["crate", "pk_crate"]:
+                w += 10; l += 5; w_dim += 5; h += 5
+            elif i.get("pack_type") in ["corners", "pk_corners"]:
+                w += 1
+            t_pieces += qty
+            t_weight += (w * qty)
+            t_vol += ((l * w_dim * h) / 1000000) * qty
             
-    draft.update({"t_weight": t_weight, "t_vol": t_vol, "t_pieces": t_pieces, "density": int(t_weight/t_vol) if t_vol > 0 else 0})
-    if "page_id" in draft: save_to_notion_cache(draft, page_id=draft.get("page_id"))
+    draft.update({
+        "t_weight": t_weight,
+        "t_vol": t_vol,
+        "t_pieces": t_pieces,
+        "density": int(t_weight/t_vol) if t_vol > 0 else 0
+    })
+    if "page_id" in draft:
+        save_to_notion_cache(draft, page_id=draft.get("page_id"))
     
     draft["state"] = "CARGO_WAIT_TARIFF_CG"
-    msg = f"📊 <b>ФИНАЛЬНАЯ СВОДКА КАРГО:</b>\n• Вес: {t_weight:.1f} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces}\n• Плотность: <b>{draft['density']} кг/м³</b>\n\n👉 Напиши Тариф Карго ($/кг):"
+    msg = (
+        f"📊 <b>ФИНАЛЬНАЯ СВОДКА КАРГО:</b>\n"
+        f"• Вес: {t_weight:.1f} кг\n"
+        f"• Объем: {t_vol:.2f} м³\n"
+        f"• Мест: {t_pieces}\n"
+        f"• Плотность: <b>{draft['density']} кг/м³</b>\n\n"
+        f"👉 Напиши Тариф Карго ($/кг):"
+    )
     
-    if update.callback_query: await update.callback_query.message.reply_text(msg, parse_mode='HTML')
-    else: await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='HTML')
+    if update.callback_query:
+        await update.callback_query.message.reply_text(msg, parse_mode='HTML')
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='HTML')
+
 
 async def finish_cargo_dims(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     draft = cargo_drafts[str(user_id)]
@@ -259,17 +303,34 @@ async def finish_cargo_dims(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     waiting = [i['name'] for i in draft["items"] if i.get("waiting_data")]
     if waiting:
         draft["state"] = "CARGO_DRAFT_WAITING"
-        if "page_id" in draft: save_to_notion_cache(draft, page_id=draft.get("page_id"))
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"💾 <b>СВОДКА КАРГО (Черновик)</b>\n⚠️ Ожидаем габариты от поставщика для:\n— {', '.join(waiting)}\n\n⏳ <i>Когда китаец ответит, нажми <b>/cargo</b> чтобы продолжить!</i>", parse_mode='HTML')
+        if "page_id" in draft:
+            save_to_notion_cache(draft, page_id=draft.get("page_id"))
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=(
+                f"💾 <b>СВОДКА КАРГО (Черновик)</b>\n"
+                f"⚠️ Ожидаем габариты от поставщика для:\n— {', '.join(waiting)}\n\n"
+                f"⏳ <i>Когда китаец ответит, нажми <b>/cargo</b> чтобы продолжить!</i>"
+            ),
+            parse_mode='HTML'
+        )
         return
 
     # Если это "Белый лист" (независимый расчет), предлагаем добавить еще товар
     if draft.get("is_independent"):
-        kb = [[InlineKeyboardButton("➕ Добавить еще товар", callback_data="cg_indep_add")], [InlineKeyboardButton("🧮 Рассчитать итог", callback_data="cg_indep_calc")]]
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Товар добавлен!\nЧто делаем дальше?", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [
+            [InlineKeyboardButton("➕ Добавить еще товар", callback_data="cg_indep_add")],
+            [InlineKeyboardButton("🧮 Рассчитать итог", callback_data="cg_indep_calc")]
+        ]
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="✅ Товар добавлен!\nЧто делаем дальше?",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
         return
 
     await finish_cargo_summary(update, context, user_id)
+
 
 async def generate_cargo_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     d = cargo_drafts[str(user_id)]
@@ -279,15 +340,20 @@ async def generate_cargo_invoice(update: Update, context: ContextTypes.DEFAULT_T
     amd_profit = (cl_cost - cg_cost) * 400 
     tot_amd = cl_cost * d.get('rate_usd_amd', 400)
     
-    d.update({"tot_amd": int(tot_amd), "cg_cny": int(cny_cost), "net_profit": int(amd_profit)})
+    d.update({
+        "tot_amd": int(tot_amd),
+        "cg_cny": int(cny_cost),
+        "net_profit": int(amd_profit)
+    })
     pid = save_to_notion_cache(d, page_id=d.get("page_id"))
     
-    msg = f"🚛 <b>CARGO INVOICE: {d['client']}</b>\n\n<b>ПАРАМЕТРЫ:</b>\n• Вес: {d['t_weight']:.1f} кг | Объем: {d['t_vol']:.2f} м³\n• Плотность: {d['density']} кг/м³\n\n<b>РАСЧЕТ:</b>\n• Логистика: ${cl_cost:.1f} (по ${d['tariff_cl']})\n\n✅ <b>К ОПЛАТЕ: {int(tot_amd):,} AMD</b>\n\n💰 Прибыль: {int(amd_profit):,} AMD"
-    
-    kb = [[InlineKeyboardButton("📑 В Airtable (Карго)", callback_data=f"cargodb_{pid}")]]
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
-    del cargo_drafts[str(user_id)]
-
+    msg = (
+        f"🚛 <b>CARGO INVOICE: {d['client']}</b>\n\n"
+        f"<b>ПАРАМЕТРЫ:</b>\n"
+        f"• Вес: {d['t_weight']:.1f} кг | Объем: {d['t_vol']:.2f} м³\n"
+        f"• Плотность: {d['density']} кг/м³\n\n"
+        f"<b>РАСЧЕТ:</b>\n"
+        f"• Логистика: ${cl_cost:.1f} (по ${d['tariff_cl']})\n\n
 
 # ====================================================================
 # ТЕЛЕГРАМ ОБРАБОТЧИКИ СООБЩЕНИЙ
