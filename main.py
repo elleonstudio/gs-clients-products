@@ -410,7 +410,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else: is_manual = False
                 except: is_manual = False
             
-            if is_manual and boxes:
+        if is_manual and boxes:
                 idx = d["current_item_index"]
                 d["items"][idx]["boxes"] = boxes
                 d["items"][idx]["waiting_data"] = False
