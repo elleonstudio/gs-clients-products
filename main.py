@@ -221,8 +221,18 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
             if full_boxes > 0: text += f"👉 <b>Это {full_boxes} полных коробок.</b> (Остаток: {rem} шт)\n"
             kb.append([InlineKeyboardButton("⚡️ Использовать базу", callback_data="cg_use_db")])
         
-      text += f"\n🇨🇳 Скопируй китайцу:\n`你好！我需要 {item['name']} {item['qty']}个。请问一整箱装多少个？一整箱的毛重是多少公斤？外箱尺寸是多少（长x宽x高）？`\n\n⏳ Перешли ответ сюда (текст/фото) или введи (Шт Вес Д Ш В).\n⏩ Пропустить: /next_product"
-        return await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb) if kb else None)
+      def build_text(item):
+    text = ""
+    text += (
+        f"\n🇨🇳 Скопируй китайцу:\n"
+        f"`你好！我需要 {item['name']} {item['qty']}个。"
+        f"请问一整箱装多少个？一整箱的毛重是多少公斤？"
+        f"外箱尺寸是多少（长x宽x高）？`\n\n"
+        f"⏳ Перешли ответ сюда (текст/фото) или введи (Шт Вес Д Ш В).\n"
+        f"⏩ Пропустить: /next_product"
+    )
+    return text
+
 
 async def finish_cargo_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     draft = cargo_drafts[str(user_id)]
