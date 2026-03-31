@@ -350,12 +350,12 @@ async def generate_cargo_invoice(update: Update, context: ContextTypes.DEFAULT_T
     msg = (
     f"🚛 <b>CARGO INVOICE: {d['client']}</b>\n\n"
     f"<b>ПАРАМЕТРЫ:</b>\n"
-    f"• Вес: {d['t_weight']:.1f} кг | Объем: {d['t_vol']:.2f} м³\n"
+    f"• Вес: {d['t_weight']:.1f} кг\n" 
+    f"• Объем: {d['t_vol']:.2f} м³\n"
     f"• Плотность: {d['density']} кг/м³\n\n"
     f"<b>РАСЧЕТ:</b>\n"
     f"• Логистика: ${cl_cost:.1f} (по ${d['tariff_cl']})\n\n"
     f"✅ <b>К ОПЛАТЕ: {int(tot_amd):,} AMD</b>\n\n"
-    f"💰 Прибыль: {int(amd_profit):,} AMD"
 )
 
 # ====================================================================
