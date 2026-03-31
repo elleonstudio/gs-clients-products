@@ -79,8 +79,8 @@ def update_item_big_data(page_id, pcs, gw, cm):
 # ИИ: KIMI VISION И ЛОГИСТ
 # ====================================================================
 def recognize_photos_batch(orders, catalog_text):
-    prompt = (f"Ты эксперт по закупкам. Вот каталог с визуальными описаниями:\n{catalog_text}\n\n"
-              f"Я отправляю {len(orders)} фото. ВНИМАТЕЛЬНО читай 'ВИЗУАЛЬНОЕ ОПИСАНИЕ' в каталоге и ищи совпадения на фото. "
+    prompt = (f"Ты эксперт по закупкам. Вот каталог товаров с их ВИЗУАЛЬНЫМ ОПИСАНИЕМ:\n{catalog_text}\n\n"
+              f"Я отправляю {len(orders)} фото. Твоя задача: ВНИМАТЕЛЬНО прочитать 'ВИЗУАЛЬНОЕ ОПИСАНИЕ' из каталога и найти точное совпадение на фото. "
               f"Верни СТРОГО JSON массив строк (ID товаров). Пример: [\"1\", \"ERROR\"]. Без лишнего текста.")
     content = [{"type": "text", "text": prompt}]
     for o in orders:
@@ -250,7 +250,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else: is_m = False
                 except: is_m = False
             
-            if is_m and boxes:
+        if is_m and boxes:
                 d["items"][d["current_item_index"]]["boxes"] = boxes
                 d["items"][d["current_item_index"]]["waiting_data"] = False
                 d["current_item_index"] += 1
@@ -267,16 +267,78 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif st == "CARGO_WAIT_TARIFF_CL":
             try:
                 d["tariff_cl"] = float(text.replace(',', '.'))
-                tot_amd = (d['t_weight'] * d['tariff_cl']) * d.get('rate_usd_amd', 400)
-                d.update({"tot_amd": int(tot_amd), "cg_cny": int(d['t_weight']*d['tariff_cg']*7.3), "net_profit": int((d['tariff_cl']-d['tariff_cg'])*d['t_weight']*400)})
+                d["state"] = "CARGO_WAIT_RATE_AMD"
+                return await update.message.reply_text("👉 Напиши курс USD -> AMD (например, 395):")
+            except: return await update.message.reply_text("❌ Введи число.")
+            
+        elif st == "CARGO_WAIT_RATE_AMD":
+            try:
+                d["rate_usd_amd"] = float(text.replace(',', '.'))
+                
+                # Математика для чека
+                t_w = d['t_weight']
+                t_v = d['t_vol']
+                t_p = d['t_pieces']
+                t_cl = d['tariff_cl']
+                t_cg = d['tariff_cg']
+                r_amd = d['rate_usd_amd']
+                r_cny = 7.3 # Фиксированный курс юаня
+                
+                delivery_cl = t_w * t_cl
+                pack_cost = 0.0 # Стоимость упаковки (пока 0, так как мы считали только вес)
+                
+                client_total_usd = delivery_cl + pack_cost
+                cargo_total_usd = (t_w * t_cg) + pack_cost
+                
+                cargo_total_cny = int(cargo_total_usd * r_cny)
+                tot_amd = int(client_total_usd * r_amd)
+                net_profit = int((client_total_usd - cargo_total_usd) * r_amd)
+                
+                d.update({
+                    "tot_amd": tot_amd, 
+                    "cg_cny": cargo_total_cny, 
+                    "net_profit": net_profit
+                })
                 pid = save_to_notion_cache(d, page_id=d.get("page_id"))
-                msg = f"🚛 <b>CARGO INVOICE: {d['client']}</b>\nВес: {d['t_weight']:.1f} кг | Объем: {d['t_vol']:.2f} м³\nЛогистика: ${(d['t_weight']*d['tariff_cl']):.1f}\n✅ <b>К ОПЛАТЕ: {int(tot_amd):,} AMD</b>"
-                kb = [[InlineKeyboardButton("📑 В Airtable", callback_data=f"cargodb_{pid}")]]
-                await update.message.reply_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
-                del cargo_drafts[str(uid)]
-            except: await update.message.reply_text("❌ Введи число.")
-            return
+                
+                # СООБЩЕНИЕ 1 (КЛИЕНТ)
+                msg_client = f"""🚛 <b>CARGO INVOICE: {d.get('client', 'CLIENT').upper()}</b>
 
+<b>ПАРАМЕТРЫ ГРУЗА:</b>
+• Вес брутто: {t_w:.1f} кг
+• Объем: {t_v:.2f} м³
+• Мест: {t_p} шт
+
+<b>РАСЧЕТ СТОИМОСТИ:</b>
+• Доставка ({t_w:.1f} кг × ${t_cl}): ${delivery_cl:.1f}
+• Упаковка и выгрузка: ${pack_cost:.1f}
+
+💵 Итого логистика: ${client_total_usd:.1f}
+🔄 Конвертация: ${client_total_usd:.1f} × {r_cny} ¥ × {r_amd} AMD
+✅ <b>К ОПЛАТЕ: {tot_amd:,} AMD</b>"""
+
+                # СООБЩЕНИЕ 2 (АДМИН)
+                msg_admin = f"""💼 <b>ВНУТРЕННИЙ РАСЧЕТ (CARGO-{str(uid)[-4:]}):</b>
+
+<b>1. ОТДАЕМ В КАРГО:</b>
+• Себестоимость (${t_cg}/кг + Услуги): ${cargo_total_usd:.1f}
+🇨🇳 Перевести Карго: {cargo_total_cny:,} ¥ (по курсу {r_cny})
+
+<b>2. ПРИБЫЛЬ:</b>
+💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {net_profit:,} AMD</b>"""
+
+                kb = [
+                    [InlineKeyboardButton("📊 Excel Карго", callback_data=f"cgexcel_{pid}")],
+                    [InlineKeyboardButton("📑 В Airtable", callback_data=f"cargodb_{pid}")]
+                ]
+                
+                await update.message.reply_text(msg_client, parse_mode='HTML')
+                await update.message.reply_text(msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+                
+                del cargo_drafts[str(uid)]
+            except Exception as e: 
+                await update.message.reply_text(f"❌ Ошибка расчета: {e}")
+            return
     if uid in user_sessions and user_sessions[uid]["state"] != "COLLECTING":
         s = user_sessions[uid]
         idx = s.get("current_item_index", 0)
@@ -411,6 +473,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }}], "typecast": True}
         resp = requests.post(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Логистика Карго", headers={"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}, json=payload)
         await q.message.reply_text("✅ В Airtable!" if resp.status_code in [200, 201] else f"❌ Ошибка Airtable: {resp.text}")
+
+    elif data.startswith("cgexcel_"):
+        pid = data.split("_")[1]
+        try: d = get_from_notion_cache(pid)
+        except: return await q.message.reply_text("❌ Чек удален.")
+        items_data = []
+        for i, item in enumerate(d['items'], 1):
+            pack_str = "Обрешетка" if item.get('pack_type') in ['crate', 'pk_crate'] else ("Уголки" if item.get('pack_type') in ['corners', 'pk_corners'] else "Мешок/Сборная")
+            items_data.append({"№": i, "Название": item['name'], "Кол-во (шт)": item['qty'], "Упаковка": pack_str})
+        items_data.extend([
+            {"№": "", "Название": "", "Кол-во (шт)": "", "Упаковка": ""},
+            {"№": "", "Название": "ИТОГОВЫЙ ВЕС", "Кол-во (шт)": f"{d['t_weight']:.1f} кг", "Упаковка": ""},
+            {"№": "", "Название": "ИТОГОВЫЙ ОБЪЕМ", "Кол-во (шт)": f"{d['t_vol']:.2f} м³", "Упаковка": ""},
+            {"№": "", "Название": "ИТОГО К ОПЛАТЕ", "Кол-во (шт)": f"{d['tot_amd']:,} AMD", "Упаковка": ""}
+        ])
+        df = pd.DataFrame(items_data)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Cargo Invoice')
+        output.seek(0)
+        await context.bot.send_document(chat_id=q.message.chat_id, document=InputFile(output, filename=f"Cargo_{d.get('client', 'Order')}.xlsx"))
 
 # ====================================================================
 # БАЗОВЫЕ КОМАНДЫ
