@@ -53,7 +53,7 @@ def get_client_catalog(client_name):
         try:
             i_id = p["ID"]["title"][0]["plain_text"]
             n_list = p.get("Name", {}).get("rich_text", [])
-            name = n_list[0]["plain_text"] if n_list else "Без названия"
+            name = n_list[0]["plain_text"] if n_list else "Bez названия"
             desc = p.get("Описание", {}).get("rich_text", [])
             desc_text = f" (ВИЗУАЛЬНОЕ ОПИСАНИЕ: {desc[0]['plain_text']})" if desc else ""
             catalog.append(f"ID: {i_id} | Название: {name}{desc_text}")
@@ -68,7 +68,7 @@ def get_item_details(client_name, item_id):
         n_list = p.get("Name", {}).get("rich_text", [])
         return {
             "page_id": r["results"][0]["id"],
-            "name": n_list[0]["plain_text"] if n_list else "Без названия",
+            "name": n_list[0]["plain_text"] if n_list else "Bez названия",
             "client_price": float(p.get("Client Price", {}).get("number") or 0.0),
             "gs_price": float(p.get("GS Price", {}).get("number") or 0.0),
             "pcs_ctn": p.get("Pcs/Ctn", {}).get("number"),
@@ -105,7 +105,7 @@ def parse_logistics_with_kimi(text, photo_url, qty):
     content = [{"type": "text", "text": prompt}]
     if text: content[0]["text"] += f"\n\nСообщение: {text}"
     if photo_url:
-        b64 = base64.b64encode(requests.get(photo_url).content).decode('utf-8')
+        b64 = base64.b64encode(requests.get(o["photo_url"]).content).decode('utf-8')
         content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         
     r = requests.post("https://api.moonshot.cn/v1/chat/completions", headers={"Authorization": f"Bearer {KIMI_TOKEN}", "Content-Type": "application/json"}, json={"model": "moonshot-v1-32k-vision-preview", "messages": [{"role": "user", "content": content}], "temperature": 0.0}).json()
@@ -167,6 +167,7 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
     draft = cargo_drafts[str(user_id)]
     idx = draft.get("current_item_index", 0)
     
+    # Пропускаем уже заполненные товары
     while idx < len(draft["items"]) and ("boxes" in draft["items"][idx] and not draft["items"][idx].get("waiting_data")):
         idx += 1
         
@@ -333,29 +334,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 d.update({"tot_amd": tot_amd, "cg_cny": cargo_total_cny, "net_profit": net_profit})
                 pid = save_to_notion_cache(d, page_id=d.get("page_id"))
                 
-                msg_client = f"""🚛 <b>CARGO INVOICE: {d.get('client', 'CLIENT').upper()}</b>
+                msg_client = f"""\n<b>CARGO INVOICE: {d.get('client', 'CLIENT').upper()}</b>\n\n<b>ПАРАМЕТРЫ ГРУЗА:</b>\n• Вес брутто: {t_w:.1f} кг\n• Объем: {t_v:.2f} м³\n• Мест: {t_p} шт\n\n<b>РАСЧЕТ СТОИМОСТИ:</b>\n• Доставка ({t_w:.1f} кг × ${t_cl}): ${delivery_cl:.1f}\n• Упаковка и выгрузка: ${pack_cost:.1f}\n\n💵 Итого логистика: ${client_total_usd:.1f}\n🔄 Конвертация: ${client_total_usd:.1f} × {r_cny} ¥ × {r_amd} AMD\n✅ <b>К ОПЛАТЕ: {tot_amd:,} AMD</b>"""
 
-<b>ПАРАМЕТРЫ ГРУЗА:</b>
-• Вес брутто: {t_w:.1f} кг
-• Объем: {t_v:.2f} м³
-• Мест: {t_p} шт
-
-<b>РАСЧЕТ СТОИМОСТИ:</b>
-• Доставка ({t_w:.1f} кг × ${t_cl}): ${delivery_cl:.1f}
-• Упаковка и выгрузка: ${pack_cost:.1f}
-
-💵 Итого логистика: ${client_total_usd:.1f}
-🔄 Конвертация: ${client_total_usd:.1f} × {r_cny} ¥ × {r_amd} AMD
-✅ <b>К ОПЛАТЕ: {tot_amd:,} AMD</b>"""
-
-                msg_admin = f"""💼 <b>ВНУТРЕННИЙ РАСЧЕТ (CARGO-{str(uid)[-4:]}):</b>
-
-<b>1. ОТДАЕМ В КАРГО:</b>
-• Себестоимость (${t_cg}/кг + Услуги): ${cargo_total_usd:.1f}
-🇨🇳 Перевести Карго: {cargo_total_cny:,} ¥ (по курсу {r_cny})
-
-<b>2. ПРИБЫЛЬ:</b>
-💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {net_profit:,} AMD</b>"""
+                msg_admin = f"""\n<b>ВНУТРЕННИЙ РАСЧЕТ (CARGO-{str(uid)[-4:]}):</b>\n\n<b>1. ОТДАЕМ В КАРГО:</b>\n• Себестоимость (${t_cg}/кг + Услуги): ${cargo_total_usd:.1f}\n🇨🇳 Перевести Карго: {cargo_total_cny:,} ¥ (по курсу {r_cny})\n\n<b>2. ПРИБЫЛЬ:</b>\n💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {net_profit:,} AMD</b>"""
 
                 kb = [[InlineKeyboardButton("📊 Excel Карго", callback_data=f"cgexcel_{pid}")],
                       [InlineKeyboardButton("📑 В Airtable", callback_data=f"cargodb_{pid}")]]
@@ -419,6 +400,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     data = q.data
     
+    if data.startswith("edit_"):
+        pid = data.split("_")[1]
+        try:
+            old_data = get_from_notion_cache(pid)
+            user_sessions[uid] = old_data
+            user_sessions[uid]["current_item_index"] = 0
+            for item in user_sessions[uid]["items"]:
+                item.pop("qty_confirmed", None)
+                item.pop("shipping", None)
+            await q.message.edit_text(f"✏️ Редактируем заказ для {old_data['client']}...")
+            await ask_next_question(update, context, uid)
+        except: await q.message.reply_text("❌ Ошибка редактирования.")
+        return
+
     if data == "cg_resume_draft":
         d = cargo_drafts[str(uid)]
         for i in d["items"]:
@@ -448,21 +443,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for i, item in enumerate(d['items'], 1):
                 pack_str = "Обрешетка" if item.get('pack_type') in ['crate', 'pk_crate'] else ("Уголки" if item.get('pack_type') in ['corners', 'pk_corners'] else "Мешок/Сборная")
                 items_data.append({"№": i, "Название": item['name'], "Кол-во (шт)": item['qty'], "Упаковка": pack_str})
-            
             items_data.extend([
                 {"№": "", "Название": "", "Кол-во (шт)": "", "Упаковка": ""},
                 {"№": "", "Название": "ИТОГОВЫЙ ВЕС", "Кол-во (шт)": f"{d['t_weight']:.1f} кг", "Упаковка": ""},
                 {"№": "", "Название": "ИТОГОВЫЙ ОБЪЕМ", "Кол-во (шт)": f"{d['t_vol']:.2f} м³", "Упаковка": ""},
                 {"№": "", "Название": "ИТОГО К ОПЛАТЕ", "Кол-во (шт)": f"{d['tot_amd']:,} AMD", "Упаковка": ""}
             ])
-            
             df = pd.DataFrame(items_data)
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df.to_excel(writer, index=False, sheet_name='Cargo Invoice')
             output.seek(0)
             await context.bot.send_document(chat_id=q.message.chat_id, document=InputFile(output, filename=f"Cargo_{d.get('client', 'Order')}.xlsx"))
-        except: await q.message.reply_text("❌ Ошибка генерации Excel.")
+        except: await q.message.reply_text("❌ Ошибка Excel.")
 
     elif data.startswith("cargodb_"):
         pid = data.split("_")[1]
@@ -477,7 +470,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }}], "typecast": True}
             requests.post(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Логистика Карго", headers={"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}, json=payload)
             await q.message.reply_text("✅ Карго записано в Airtable!")
-        except: await q.message.reply_text("❌ Ошибка записи в Airtable.")
+        except: await q.message.reply_text("❌ Ошибка Airtable.")
+
+    elif data.startswith("airtable_"):
+        pid = data.split("_")[1]
+        try:
+            d = get_from_notion_cache(pid)
+            inv = f"COMMERCIAL INVOICE: {d['client']}\n" + "".join([f"• {i['name']}: {i['qty']} шт\n" for i in d['items']]) + f"\nИТОГО: {d['final_total_amd']} AMD"
+            requests.post(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка", headers={"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}, json={"records": [{"fields": {"Клиент": d["client"], "Сумма (¥)": d["subtotal_cny"], "Курс Клиент": d["client_rate"], "Курс Реал": d["real_rate"], "Реал Цена Закупки (¥)": d["purchase_cny"], "Заказ": inv}}], "typecast": True})
+            await q.message.reply_text("✅ Закупка записана!")
+        except: await q.message.reply_text("❌ Ошибка Закупки.")
 
     elif data.startswith("tocargo_"):
         pid = data.split("_")[1]
