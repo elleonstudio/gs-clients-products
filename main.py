@@ -63,7 +63,8 @@ def get_client_catalog(client_name):
         p = item["properties"]
         try:
             i_id = p["ID"]["title"][0]["plain_text"]
-            name = p.get("Name", {}).get("rich_text", [])[0]["plain_text"]
+            name_list = p.get("Name", {}).get("rich_text", [])
+            name = name_list[0]["plain_text"] if name_list else "Без названия"
             desc = p.get("Описание", {}).get("rich_text", [])
             desc_text = f" (Вид: {desc[0]['plain_text']})" if desc else ""
             catalog.append(f"ID: {i_id} | {name}{desc_text}")
@@ -77,9 +78,10 @@ def get_item_details(client_name, item_id):
     page = resp["results"][0]
     p = page["properties"]
     try:
+        name_list = p.get("Name", {}).get("rich_text", [])
         return {
             "page_id": page["id"],
-            "name": p.get("Name", {}).get("rich_text", [])[0]["plain_text"],
+            "name": name_list[0]["plain_text"] if name_list else "Без названия",
             "client_price": float(p.get("Client Price", {}).get("number") or 0.0),
             "gs_price": float(p.get("GS Price", {}).get("number") or 0.0),
             "pcs_ctn": p.get("Pcs/Ctn", {}).get("number"),
@@ -463,6 +465,11 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "ERROR" in rid: continue
         det = get_item_details(s["client"], rid)
         if det: s["items"].append({"name": det['name'], "client_price": det['client_price'], "gs_price": det['gs_price'], "qty": o["qty"], "shipping": None, "page_id": det["page_id"], "pcs_ctn": det["pcs_ctn"], "gw_kg": det["gw_kg"], "cm": det["cm"]})
+
+    # ЖЕСТКАЯ ЗАЩИТА: Если товаров 0, останавливаем процесс
+    if not s["items"]:
+        await msg.edit_text("❌ ОШИБКА: Kimi не смог распознать фото, или клиент не найден в базе Notion. Проверь имя клиента и попробуй заново.")
+        return
 
     await msg.edit_text("✅ Готово! Уточняем детали...")
     await ask_next_question(update, context, uid)
