@@ -432,32 +432,40 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ====================================================================
 # CALLBACK HANDLER (КНОПКИ)
 # ====================================================================
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    uid = update.effective_user.id
-    data = q.data
+async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    draft = cargo_drafts[str(user_id)]
+    idx = draft.get("current_item_index", 0)
     
-    # Меню команды /cargo
-    if data == "cg_resume_draft":
-        d = cargo_drafts[str(uid)]
-        for i in d["items"]:
-            if i.get("waiting_data"):
-                i.pop("waiting_data", None)
-                i.pop("boxes", None)
-        idx = 0
-        while idx < len(d["items"]) and "boxes" in d["items"][idx]: idx += 1
-        d["current_item_index"] = idx
-        await q.message.edit_text(f"📂 Возвращаемся к черновику Карго для {d.get('client', 'клиента')}...")
-        await process_cargo_items(update, context, uid)
+    # Пропускаем уже заполненные товары
+    while idx < len(draft["items"]) and ("boxes" in draft["items"][idx] and not draft["items"][idx].get("waiting_data")):
+        idx += 1
+        
+    draft["current_item_index"] = idx
+    if idx >= len(draft["items"]): 
+        return await finish_cargo_dims(update, context, user_id)
+    
+    item = draft["items"][idx]
+    
+    if "pack_type" not in item:
+        draft["state"] = "CARGO_WAIT_PACK"
+        kb = [[InlineKeyboardButton("📦 Мешок/Сборная (+0)", callback_data="pk_sack")], [InlineKeyboardButton("📐 Уголки (+1 кг)", callback_data="pk_corners")], [InlineKeyboardButton("🪵 Обрешетка (+10кг, +5см)", callback_data="pk_crate")]]
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📦 <b>Товар: {item['name']} ({item['qty']} шт)</b>\nКак будем упаковывать?", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+        return
 
-    elif data == "cg_indep_new":
-        cargo_drafts[str(uid)] = {"items": [], "current_item_index": 0, "is_independent": True, "state": "CG_NEW_CLIENT"}
-        await q.message.edit_text("👤 Напиши имя клиента (например: Aram_YVN):")
-
-    elif data == "cg_indep_add":
-        cargo_drafts[str(uid)]["state"] = "CG_NEW_ITEM"
-        await q.message.edit_text("📦 Напиши название товара и количество (например: Конусы 350):")
+    if "boxes" not in item or item.get("waiting_data"):
+        draft["state"] = "CARGO_WAIT_DIMS"
+        text = f"📐 <b>Габариты для: {item['name']} (Нужно {item['qty']} шт)</b>\n"
+        kb = []
+        
+        if item.get("pcs_ctn") and item.get("gw_kg") and item.get("cm"):
+            full_boxes = int(item['qty']) // item['pcs_ctn']
+            rem = int(item['qty']) % item['pcs_ctn']
+            text += f"\n⚡️ <b>Найдено в базе:</b>\n• В коробке: {item['pcs_ctn']} шт\n• Вес: {item['gw_kg']} кг | Габариты: {item['cm']}\n"
+            if full_boxes > 0: text += f"👉 <b>Это {full_boxes} полных коробок.</b> (Остаток: {rem} шт)\n"
+            kb.append([InlineKeyboardButton("⚡️ Использовать базу", callback_data="cg_use_db")])
+        
+        text += f"\n🇨🇳 Скопируй китайцу:\n`你好！我需要 {item['name']} {item['qty']}个。请问一整箱装多少个？一整箱的毛重是多少公斤？外箱尺寸是多少（长x宽x高）？`\n\n⏳ Перешли ответ сюда (текст/фото) или введи (Шт Вес Д Ш В).\n⏩ Пропустить: /next_product"
+        return await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb) if kb else None)
 
     elif data == "cg_indep_calc":
         await finish_cargo_summary(update, context, uid)
