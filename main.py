@@ -410,27 +410,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else: is_manual = False
                 except: is_manual = False
             
-        if is_manual and boxes:
-                idx = d["current_item_index"]
-                d["items"][idx]["boxes"] = boxes
-                d["items"][idx]["waiting_data"] = False
-                await update.message.reply_text("✅ Габариты приняты вручную!")
-                d["current_item_index"] += 1
-                return await process_cargo_items(update, context, uid)
-            
-            await update.message.reply_text("⏳ Анализирую текст ИИ-Логистом...")
-            idx = d["current_item_index"]
-            res = parse_logistics_with_kimi(text, None, d["items"][idx]["qty"])
-            await process_kimi_logistics_result(update, context, uid, res)
-            return
-            
-        elif st == "CARGO_WAIT_TARIFF_CG":
-            try:
-                d["tariff_cg"] = float(text.replace(',', '.'))
-                d["state"] = "CARGO_WAIT_TARIFF_CL"
-                await update.message.reply_text("👉 Напиши Тариф Клиенту ($/кг):")
-            except: await update.message.reply_text("❌ Введи число.")
-            return
+       if is_manual and boxes:
+    idx = d["current_item_index"]
+    d["items"][idx]["boxes"] = boxes
+    d["items"][idx]["waiting_data"] = False
+    await update.message.reply_text("✅ Габариты приняты вручную!")
+    d["current_item_index"] += 1
+    return await process_cargo_items(update, context, uid)
+
+else:
+    await update.message.reply_text("⏳ Анализирую текст ИИ-Логистом...")
+    idx = d["current_item_index"]
+    res = parse_logistics_with_kimi(text, None, d["items"][idx]["qty"])
+    await process_kimi_logistics_result(update, context, uid, res)
+    return
+
+elif st == "CARGO_WAIT_TARIFF_CG":
+    try:
+        d["tariff_cg"] = float(text.replace(',', '.'))
+        d["state"] = "CARGO_WAIT_TARIFF_CL"
+        await update.message.reply_text("👉 Напиши Тариф Клиенту ($/кг):")
+    except:
+        await update.message.reply_text("❌ Введи число.")
+    return
             
        elif st == "CARGO_WAIT_TARIFF_CG":
             try:
