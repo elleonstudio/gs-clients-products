@@ -218,7 +218,7 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
             kb = [[InlineKeyboardButton("⚡️ Использовать базу", callback_data="cg_use_db")], [InlineKeyboardButton("🤖 Спросить Kimi (Китайца)", callback_data="cg_ask_kimi")]]
         else:
             text += "\nДанных в базе нет. Отправь габариты вручную (Коробок Вес Д Ш В) ИЛИ спроси ИИ:"
-            kb = [[InlineKeyboardButton("🤖 Извлечь ответ китайца (Kimi)", callback_data="cg_ask_kimi")]]
+            kb = [[InlineKeyboardButton("Спросить Kimi", callback_data="cg_ask_kimi")]]
             
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
         return
