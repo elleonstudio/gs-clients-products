@@ -353,7 +353,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except: await update.message.reply_text("❌ Введи число.")
             return
             
-       elif st == "CARGO_WAIT_TARIFF_CL":
+       elif st == "CARGO_WAIT_TARIFF_CG":
+            try:
+                d["tariff_cg"] = float(text.replace(',', '.'))
+                d["state"] = "CARGO_WAIT_TARIFF_CL"
+                await update.message.reply_text("👉 Напиши Тариф Клиенту ($/кг):")
+            except: await update.message.reply_text("❌ Введи число.")
+            return
+            
+        elif st == "CARGO_WAIT_TARIFF_CL":
             try:
                 d["tariff_cl"] = float(text.replace(',', '.'))
                 d["state"] = "CARGO_WAIT_RATE_AMD"
@@ -528,8 +536,7 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
         cargo_drafts[str(uid)]["state"] = "CARGO_WAIT_DIMS"
         await q.message.reply_text("❌ Окей, введи габариты вручную (Штук Вес Д Ш В):")
             
-    elif data.startswith("cargodb_"):
-        elif data.startswith("cgexcel_"):
+    elif data.startswith("cgexcel_"):
         pid = data.split("_")[1]
         try: d = get_from_notion_cache(pid)
         except: return await q.message.reply_text("❌ Чек удален.")
@@ -549,8 +556,11 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
             df.to_excel(writer, index=False, sheet_name='Cargo Invoice')
         output.seek(0)
         await context.bot.send_document(chat_id=q.message.chat_id, document=InputFile(output, filename=f"Cargo_{d.get('client', 'Order')}.xlsx"))
+
+    elif data.startswith("cargodb_"):
         pid = data.split("_")[1]
-        d = get_from_notion_cache(pid)
+        try: d = get_from_notion_cache(pid)
+        except: return await q.message.reply_text("❌ Чек удален.")
         payload = {"records": [{"fields": {
             "Party_ID": f"CARGO-{str(uid)[-4:]}-{datetime.now().strftime('%M%S')}",
             "Total_Weight_KG": float(d["t_weight"]), "Total_Volume_CBM": float(d["t_vol"]),
