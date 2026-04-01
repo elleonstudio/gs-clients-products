@@ -170,10 +170,10 @@ async def ask_ff_item(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: i
 async def finish_ff(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
     s = ff_sessions[uid]
     boxes = optimize_boxes_ff(s["units"])
-    b_cnt = len(boxes) # Кол-во коробок
-    total_u = sum(u['qty'] for u in s["units"]) # Кол-во пакетов
+    b_cnt = len(boxes) 
+    total_u = sum(u['qty'] for u in s["units"]) 
     
-    # Экономика (тариф 1.5 + наценка 0.5)
+    # Экономика
     cost_cl = total_u * 2.0 
     cost_real = (total_u * 1.5) + (b_cnt * BOX_PRICE_CNY)
     
@@ -187,8 +187,7 @@ async def finish_ff(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int
     await context.bot.send_message(chat_id=update.effective_chat.id, text=msg_cl, parse_mode='HTML')
     await context.bot.send_message(chat_id=update.effective_chat.id, text=msg_adm, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
     
-    if uid in ff_sessions:
-        del ff_sessions[uid]
+    if uid in ff_sessions: del ff_sessions[uid]
 
 # ====================================================================
 # МОДУЛЬ КАРГО (ЛОГИСТИКА)
@@ -229,10 +228,8 @@ async def finish_cargo_dims(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             wd = float(b.get("w_dim") or 0.0)
             h = float(b.get("h") or 0.0)
             
-            if i.get("pack_type") == "pk_crate": 
-                w += 10; l += 5; wd += 5; h += 5
-            elif i.get("pack_type") == "pk_corners": 
-                w += 1
+            if i.get("pack_type") == "pk_crate": w += 10; l += 5; wd += 5; h += 5
+            elif i.get("pack_type") == "pk_corners": w += 1
             
             t_p += q
             t_w += (w * q)
@@ -273,23 +270,19 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
     inv_number = f"{client_code}-{now.strftime('%H%M')}"
     date_str = now.strftime('%m.%d.%Y')
     
-    # Шапка инвойса (сохранили по твоей просьбе из предыдущего макета)
     inv_text = f"COMMERCIAL INVOICE: {inv_number}\n📅 Date: {date_str}\n\n1. ТОВАРНАЯ ВЕДОМОСТЬ:\n"
     
-    # Формируем список товаров
     for i in s["items"]:
         q, p, sh = int(i.get('qty') or 1), float(i.get('client_price') or 0.0), float(i.get('shipping') or 0.0)
         lt = (q * p) + sh
         subtotal += lt
         inv_text += f"• {i['name']}: — {q} шт\n{q} × {p} + {sh} = {lt:.1f}¥\n\n"
 
-    # Расчет комиссии и итогов
     c_amd = max(10000, int(subtotal * 0.03 * c_rate))
     c_cny = c_amd / c_rate
     tot_cny = subtotal + c_cny
     tot_amd = int((subtotal * c_rate) + c_amd)
 
-    # Собираем красивый итоговый текст со всеми отступами без HTML
     full_msg = (
         f"{inv_text}"
         f"────────────────────────\n"
@@ -302,7 +295,6 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
         f"✅ ИТОГО К ОПЛАТЕ: {tot_amd:,} AMD"
     )
 
-    # Сохраняем полный текст в кэш
     s.update({
         "subtotal_cny": subtotal, 
         "tot_amd": tot_amd, 
@@ -311,7 +303,6 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
     })
     new_pid = save_to_notion_cache(s, page_id=page_id)
 
-    # Возвращаем 5 кнопок, чтобы функционал не пропал!
     kb = [
         [InlineKeyboardButton("✏️ Изменить товар", callback_data=f"editinit_{new_pid}")], 
         [InlineKeyboardButton("📑 В Airtable", callback_data=f"airtable_{new_pid}"), InlineKeyboardButton("🧮 В Карго", callback_data=f"tocargo_{new_pid}")],
@@ -389,6 +380,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tot_amd = int(tot_cl_usd * r_amd)
                 profit = int((t_cl - t_cg) * t_w * r_amd)
                 cny_cargo = int(t_w * t_cg * 7.3)
+                
+                d["tot_amd"] = tot_amd
                 
                 await update.message.reply_text(f"🚛 <b>CARGO INVOICE: {d['client'].upper()}</b>\n\nПАРАМЕТРЫ:\n• Вес: {t_w:.1f}кг | {d['t_pieces']} мест\n\nРАСЧЕТ:\n• Доставка: ${tot_cl_usd:.1f}\n✅ <b>К ОПЛАТЕ: {tot_amd:,} AMD</b>", parse_mode='HTML')
                 
@@ -497,21 +490,49 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ff_sessions[uid]["current_idx"] += 1
         await ask_ff_item(update, context, uid)
         
+    # --- ЭКСПОРТ В AIRTABLE ---
+    elif data.startswith("airtable_"):
+        cache_pid = data.split("_")[1]
+        try:
+            # Получаем полные данные заказа из Notion Cache
+            order_data = get_from_notion_cache(cache_pid)
+            
+            # Подготовка данных для Airtable
+            airtable_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка"
+            
+            headers = {
+                "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "records": [
+                    {
+                        "fields": {
+                            "Клиент": order_data["client"],
+                            "Заказ": order_data.get("full_invoice", "Текст не найден")
+                        }
+                    }
+                ],
+                "typecast": True
+            }
+            
+            # Отправка POST запроса в Airtable
+            response = requests.post(airtable_url, headers=headers, json=payload)
+            
+            if response.status_code == 200:
+                await q.message.reply_text("✅ Данные успешно экспортированы в Airtable (Закупка)!")
+            else:
+                await q.message.reply_text(f"❌ Ошибка Airtable: {response.status_code}\nОтвет: {response.text}")
+                
+        except Exception as e:
+            await q.message.reply_text(f"❌ Сбой при экспорте: {str(e)}")
+
     # --- EXISTING CALLBACKS ---
     elif data.startswith("editinit_"):
         user_sessions[uid] = get_from_notion_cache(data.split("_")[1])
         user_sessions[uid]["state"] = "ASK_EDIT_ID"
         await q.message.reply_text("Введи номер товара из списка для изменения:")
-    
-    elif data.startswith("airtable_"):
-        try:
-            d = get_from_notion_cache(data.split("_")[1])
-            # Берем готовый красивый текст из full_invoice без тегов HTML
-            payload = {"records": [{"fields": {"Клиент": d["client"], "Заказ": d.get("full_invoice", "Текст не найден")}}], "typecast": True}
-            requests.post(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка", headers={"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}, json=payload)
-            await q.message.reply_text("✅ Успешно выгружено в Airtable!")
-        except Exception as e: 
-            await q.message.reply_text(f"❌ Ошибка выгрузки в Airtable: {e}")
 
     elif data.startswith("pk_"):
         cargo_drafts[str(uid)]["items"][cargo_drafts[str(uid)]["current_item_index"]]["pack_type"] = data
