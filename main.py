@@ -1,7 +1,7 @@
 import os, requests, base64, json, io, re
 import pandas as pd
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ====================================================================
@@ -268,52 +268,57 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
     c_rate = 58.0
     subtotal = 0
     
-    # 1. Формируем красивую шапку чека с датой и номером
     now = datetime.now()
-    client_code = s['client'].upper()[:4] # Первые 4 буквы имени клиента
+    client_code = s['client'].upper()[:4]
     inv_number = f"{client_code}-{now.strftime('%H%M')}"
     date_str = now.strftime('%m.%d.%Y')
     
-    inv_text = f"<b>COMMERCIAL INVOICE: {inv_number}</b>\n📅 Date: {date_str}\n\n<b>1. ТОВАРНАЯ ВЕДОМОСТЬ:</b>\n"
+    # Шапка инвойса (сохранили по твоей просьбе из предыдущего макета)
+    inv_text = f"COMMERCIAL INVOICE: {inv_number}\n📅 Date: {date_str}\n\n1. ТОВАРНАЯ ВЕДОМОСТЬ:\n"
     
-    # 2. Добавляем товары с нужными отступами
+    # Формируем список товаров
     for i in s["items"]:
-        q, p, sh = int(i.get('qty') or 0), float(i.get('client_price') or 0.0), float(i.get('shipping') or 0.0)
+        q, p, sh = int(i.get('qty') or 1), float(i.get('client_price') or 0.0), float(i.get('shipping') or 0.0)
         lt = (q * p) + sh
         subtotal += lt
         inv_text += f"• {i['name']}: — {q} шт\n{q} × {p} + {sh} = {lt:.1f}¥\n\n"
 
-    # 3. Считаем комиссию и итоги
-    c_amd = 10000 if (subtotal * 0.03 * c_rate < 10000) else int(subtotal * 0.03 * c_rate)
+    # Расчет комиссии и итогов
+    c_amd = max(10000, int(subtotal * 0.03 * c_rate))
+    c_cny = c_amd / c_rate
+    tot_cny = subtotal + c_cny
     tot_amd = int((subtotal * c_rate) + c_amd)
-    commission_cny = c_amd / c_rate
-    total_cny = subtotal + commission_cny
-    
-    # 4. Сохраняем чистый текст без тегов HTML в память (для Airtable и Notion)
-    clean_inv_text = inv_text.replace("<b>", "").replace("</b>", "")
-    s.update({"subtotal_cny": subtotal, "tot_amd": tot_amd, "client_rate": c_rate, "inv_text": clean_inv_text})
-    new_pid = save_to_notion_cache(s, page_id=page_id)
 
-    # 5. Собираем финальное сообщение для Telegram со всеми нужными отступами
+    # Собираем красивый итоговый текст со всеми отступами без HTML
     full_msg = (
         f"{inv_text}"
         f"────────────────────────\n"
-        f"<b>SUBTOTAL:</b> {subtotal:.1f}¥\n\n"
-        f"<b>2. КОМИССИЯ И СЕРВИС</b>\n"
-        f"(Минимальная 10000 AMD): {commission_cny:.1f}¥\n\n"
-        f"<b>3. ИТОГОВЫЙ РАСЧЕТ</b>\n"
-        f"• Всего в юанях: {total_cny:.1f}¥\n"
+        f"SUBTOTAL: {subtotal:.1f}¥\n\n"
+        f"2. КОМИССИЯ И СЕРВИС\n"
+        f"(Минимальная 10000 AMD): {c_cny:.1f}¥\n\n"
+        f"3. ИТОГОВЫЙ РАСЧЕТ\n"
+        f"• Всего в юанях: {tot_cny:.1f}¥\n"
         f"• Курс: {c_rate}\n\n"
-        f"✅ <b>ИТОГО К ОПЛАТЕ: {tot_amd:,} AMD</b>"
+        f"✅ ИТОГО К ОПЛАТЕ: {tot_amd:,} AMD"
     )
-    
+
+    # Сохраняем полный текст в кэш
+    s.update({
+        "subtotal_cny": subtotal, 
+        "tot_amd": tot_amd, 
+        "client_rate": c_rate, 
+        "full_invoice": full_msg
+    })
+    new_pid = save_to_notion_cache(s, page_id=page_id)
+
+    # Возвращаем 5 кнопок, чтобы функционал не пропал!
     kb = [
         [InlineKeyboardButton("✏️ Изменить товар", callback_data=f"editinit_{new_pid}")], 
         [InlineKeyboardButton("📑 В Airtable", callback_data=f"airtable_{new_pid}"), InlineKeyboardButton("🧮 В Карго", callback_data=f"tocargo_{new_pid}")],
         [InlineKeyboardButton("📊 Excel", callback_data=f"cgexcel_{new_pid}"), InlineKeyboardButton("📦 Склад (FF)", callback_data=f"ffinit_{new_pid}")]
     ]
     
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=full_msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=full_msg, reply_markup=InlineKeyboardMarkup(kb))
 
 # ====================================================================
 # MESSAGE HANDLERS
@@ -434,8 +439,46 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     uid, data = q.from_user.id, q.data
     
+    # --- ЛОГИКА ГЕНЕРАЦИИ EXCEL ---
+    if data.startswith("cgexcel_"):
+        pid = data.split("_")[1]
+        try: 
+            d = get_from_notion_cache(pid)
+        except: 
+            return await q.message.reply_text("❌ Чек удален или устарел.")
+        
+        items_data = []
+        for i, item in enumerate(d.get('items', []), 1):
+            pack_str = "Обрешетка" if item.get('pack_type') in ['crate', 'pk_crate'] else \
+                       ("Уголки" if item.get('pack_type') in ['corners', 'pk_corners'] else "Мешок/Сборная")
+            
+            items_data.append({
+                "№": i,
+                "Название": item.get('name', 'Без названия'),
+                "Кол-во (шт)": item.get('qty', 0),
+                "Упаковка": pack_str
+            })
+        
+        items_data.extend([
+            {"№": "", "Название": "", "Кол-во (шт)": "", "Упаковка": ""},
+            {"№": "", "Название": "ИТОГОВЫЙ ВЕС", "Кол-во (шт)": f"{d.get('t_weight', 0):.1f} кг", "Упаковка": ""},
+            {"№": "", "Название": "ИТОГОВЫЙ ОБЪЕМ", "Кол-во (шт)": f"{d.get('t_vol', 0):.2f} м³", "Упаковка": ""},
+            {"№": "", "Название": "ИТОГО К ОПЛАТЕ", "Кол-во (шт)": f"{d.get('tot_amd', 0):,} AMD", "Упаковка": ""}
+        ])
+        
+        df = pd.DataFrame(items_data)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Cargo Invoice')
+        
+        output.seek(0)
+        await context.bot.send_document(
+            chat_id=q.message.chat_id, 
+            document=InputFile(output, filename=f"Cargo_{d.get('client', 'Order').upper()}.xlsx")
+        )
+
     # --- FF CALLBACKS ---
-    if data.startswith("ffinit_"):
+    elif data.startswith("ffinit_"):
         await start_ff_process(update, context, data.split("_")[1])
         
     elif data == "ff_db":
@@ -463,10 +506,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("airtable_"):
         try:
             d = get_from_notion_cache(data.split("_")[1])
-            requests.post(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка", headers={"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}, json={"records": [{"fields": {"Клиент": d["client"], "Заказ": d["inv_text"] + f"\nИТОГО: {d['tot_amd']} AMD"}}], "typecast": True})
-            await q.message.reply_text("✅ В Airtable!")
-        except: 
-            await q.message.reply_text("❌ Ошибка записи.")
+            # Берем готовый красивый текст из full_invoice без тегов HTML
+            payload = {"records": [{"fields": {"Клиент": d["client"], "Заказ": d.get("full_invoice", "Текст не найден")}}], "typecast": True}
+            requests.post(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка", headers={"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}, json=payload)
+            await q.message.reply_text("✅ Успешно выгружено в Airtable!")
+        except Exception as e: 
+            await q.message.reply_text(f"❌ Ошибка выгрузки в Airtable: {e}")
 
     elif data.startswith("pk_"):
         cargo_drafts[str(uid)]["items"][cargo_drafts[str(uid)]["current_item_index"]]["pack_type"] = data
