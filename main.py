@@ -267,26 +267,52 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
     s = user_sessions[uid]
     c_rate = 58.0
     subtotal = 0
-    inv_text = "<b>ТОВАРНАЯ ВЕДОМОСТЬ:</b>\n"
     
+    # 1. Формируем красивую шапку чека с датой и номером
+    now = datetime.now()
+    client_code = s['client'].upper()[:4] # Первые 4 буквы имени клиента
+    inv_number = f"{client_code}-{now.strftime('%H%M')}"
+    date_str = now.strftime('%m.%d.%Y')
+    
+    inv_text = f"<b>COMMERCIAL INVOICE: {inv_number}</b>\n📅 Date: {date_str}\n\n<b>1. ТОВАРНАЯ ВЕДОМОСТЬ:</b>\n"
+    
+    # 2. Добавляем товары с нужными отступами
     for i in s["items"]:
         q, p, sh = int(i.get('qty') or 0), float(i.get('client_price') or 0.0), float(i.get('shipping') or 0.0)
         lt = (q * p) + sh
         subtotal += lt
         inv_text += f"• {i['name']}: — {q} шт\n{q} × {p} + {sh} = {lt:.1f}¥\n\n"
 
+    # 3. Считаем комиссию и итоги
     c_amd = 10000 if (subtotal * 0.03 * c_rate < 10000) else int(subtotal * 0.03 * c_rate)
     tot_amd = int((subtotal * c_rate) + c_amd)
+    commission_cny = c_amd / c_rate
+    total_cny = subtotal + commission_cny
     
-    s.update({"subtotal_cny": subtotal, "tot_amd": tot_amd, "client_rate": c_rate, "inv_text": inv_text})
+    # 4. Сохраняем чистый текст без тегов HTML в память (для Airtable и Notion)
+    clean_inv_text = inv_text.replace("<b>", "").replace("</b>", "")
+    s.update({"subtotal_cny": subtotal, "tot_amd": tot_amd, "client_rate": c_rate, "inv_text": clean_inv_text})
     new_pid = save_to_notion_cache(s, page_id=page_id)
 
-    full_msg = f"{inv_text}────────────────────────\n<b>SUBTOTAL:</b> {subtotal:.1f}¥\n\n<b>2. КОМИССИЯ:</b> {c_amd / c_rate:.1f}¥\n<b>3. ИТОГОВЫЙ РАСЧЕТ:</b>\n• Итого юаней: {subtotal + (c_amd/c_rate):.1f}¥\n• Курс: {c_rate}\n✅ <b>К ОПЛАТЕ: {tot_amd:,} AMD</b>"
+    # 5. Собираем финальное сообщение для Telegram со всеми нужными отступами
+    full_msg = (
+        f"{inv_text}"
+        f"────────────────────────\n"
+        f"<b>SUBTOTAL:</b> {subtotal:.1f}¥\n\n"
+        f"<b>2. КОМИССИЯ И СЕРВИС</b>\n"
+        f"(Минимальная 10000 AMD): {commission_cny:.1f}¥\n\n"
+        f"<b>3. ИТОГОВЫЙ РАСЧЕТ</b>\n"
+        f"• Всего в юанях: {total_cny:.1f}¥\n"
+        f"• Курс: {c_rate}\n\n"
+        f"✅ <b>ИТОГО К ОПЛАТЕ: {tot_amd:,} AMD</b>"
+    )
     
     kb = [
         [InlineKeyboardButton("✏️ Изменить товар", callback_data=f"editinit_{new_pid}")], 
-        [InlineKeyboardButton("📑 В Airtable", callback_data=f"airtable_{new_pid}"), InlineKeyboardButton("🧮 В Карго", callback_data=f"tocargo_{new_pid}")]
+        [InlineKeyboardButton("📑 В Airtable", callback_data=f"airtable_{new_pid}"), InlineKeyboardButton("🧮 В Карго", callback_data=f"tocargo_{new_pid}")],
+        [InlineKeyboardButton("📊 Excel", callback_data=f"cgexcel_{new_pid}"), InlineKeyboardButton("📦 Склад (FF)", callback_data=f"ffinit_{new_pid}")]
     ]
+    
     await context.bot.send_message(chat_id=update.effective_chat.id, text=full_msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
 
 # ====================================================================
