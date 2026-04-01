@@ -4,7 +4,6 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# Конфигурация
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 DATABASE_ID = os.getenv("DATABASE_ID")
@@ -92,7 +91,7 @@ def parse_logistics_with_kimi(text, photo_url):
     except: return None
 
 # ====================================================================
-# МОДУЛЬ КАРГО
+# МОДУЛЬ КАРГО (ОСНОВНАЯ МАТЕМАТИКА)
 # ====================================================================
 async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
     d = cargo_drafts[str(uid)]
@@ -104,13 +103,13 @@ async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE
     item = d["items"][idx]
     if "pack_type" not in item:
         d["state"] = "CARGO_WAIT_PACK"
-        kb = [[InlineKeyboardButton("📦 Мешок (+0)", callback_data="pk_sack"), InlineKeyboardButton("📐 Уголки (+1кг)", callback_data="pk_corners")], [InlineKeyboardButton("🪵 Обрешетка (+10кг)", callback_data="pk_crate")], [InlineKeyboardButton("🎁 В наборе", callback_data="pk_inset")]]
+        kb = [[InlineKeyboardButton("📦 Мешок (+0)", callback_data="pk_sack"), InlineKeyboardButton("📐 Уголки (+1кг)", callback_data="pk_corners")], [InlineKeyboardButton("🪵 Обрешетка (+10кг)", callback_data="pk_crate"), InlineKeyboardButton("🎁 В наборе", callback_data="pk_inset")]]
         return await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📦 Товар: <b>{item['name']}</b>\nКак упакуем?", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
 
     d["state"] = "CARGO_WAIT_DIMS"
     text = f"📐 Габариты: <b>{item['name']} ({item['qty']} шт)</b>\n"
     kb = []
-    if item.get("cm") and item.get("gw_kg"): kb.append([InlineKeyboardButton("⚡️ База Notion", callback_data="cg_use_db")])
+    if item.get("cm"): kb.append([InlineKeyboardButton("⚡️ База Notion", callback_data="cg_use_db")])
     await context.bot.send_message(chat_id=update.effective_chat.id, text=text + "Введи данные остатка или перешли ответ китайца:", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb) if kb else None)
 
 async def finish_cargo_dims(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
@@ -119,11 +118,12 @@ async def finish_cargo_dims(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     for i in d["items"]:
         if i.get("pack_type") == "pk_inset": continue
         for b in i.get("boxes", []):
-            q = float(b.get("qty", 0))
-            w = float(b.get("w") or 0)
-            l = float(b.get("l") or 0)
-            wd = float(b.get("w_dim") or 0)
-            h = float(b.get("h") or 0)
+            # ЖЕСТКАЯ ЗАЩИТА ОТ None (исправление ошибки)
+            q = int(b.get("qty") or 0)
+            w = float(b.get("w") or 0.0)
+            l = float(b.get("l") or 0.0)
+            wd = float(b.get("w_dim") or 0.0)
+            h = float(b.get("h") or 0.0)
             
             if i.get("pack_type") == "pk_crate": w += 10; l += 5; wd += 5; h += 5
             elif i.get("pack_type") == "pk_corners": w += 1
@@ -132,13 +132,15 @@ async def finish_cargo_dims(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             t_w += (w * q)
             t_v += ((l * wd * h) / 1000000) * q
             
-    d.update({"t_weight": t_w, "t_vol": t_v, "t_pieces": int(t_p), "density": int(t_w/t_v) if t_v > 0 else 0, "state": "CARGO_WAIT_TARIFF_CG"})
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📊 <b>ИТОГ:</b> {t_w:.1f}кг | {t_v:.2f}м³ | {int(t_p)} мест. Плотность: {d['density']}\n👉 Напиши Тариф Карго ($/кг):", parse_mode='HTML')
+    density = int(t_w/t_v) if t_v > 0 else 0
+    d.update({"t_weight": t_w, "t_vol": t_v, "t_pieces": t_p, "density": density, "state": "CARGO_WAIT_TARIFF_CG"})
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📊 <b>ИТОГ:</b> {t_w:.1f}кг | {t_v:.2f}м³ | {t_p} мест. Плотность: {density}\n👉 Напиши Тариф Карго ($/кг):", parse_mode='HTML')
 
 # ====================================================================
 # МОДУЛЬ ЗАКУПКИ
 # ====================================================================
 async def ask_next_question(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
+    if uid not in user_sessions: return
     s = user_sessions[uid]
     idx = s.get("current_item_index", 0)
     if idx >= len(s["items"]): return await generate_final_invoice(update, context, uid)
@@ -158,7 +160,7 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
     subtotal = 0
     inv_text = "<b>ТОВАРНАЯ ВЕДОМОСТЬ:</b>\n"
     for i in s["items"]:
-        q, p, sh = int(i['qty']), float(i['client_price']), float(i['shipping'])
+        q, p, sh = int(i.get('qty') or 0), float(i.get('client_price') or 0.0), float(i.get('shipping') or 0.0)
         lt = (q * p) + sh
         subtotal += lt
         inv_text += f"• {i['name']}: — {q} шт\n{q} × {p} + {sh} = {lt:.1f}¥\n\n"
@@ -177,6 +179,7 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
 # ====================================================================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid, text = update.message.from_user.id, update.message.text.strip()
+    
     if uid in user_sessions:
         s = user_sessions[uid]
         if s["state"] == "COLLECTING" and text.isdigit():
@@ -198,22 +201,30 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = parse_logistics_with_kimi(text, None)
             await process_kimi_logistics_result(update, context, uid, res)
         elif d["state"] == "CARGO_WAIT_TARIFF_CG":
-            d["tariff_cg"], d["state"] = float(text.replace(',','.')), "CARGO_WAIT_TARIFF_CL"
-            await update.message.reply_text("👉 Тариф Клиенту ($/кг):")
+            try:
+                d["tariff_cg"] = float(text.replace(',','.'))
+                d["state"] = "CARGO_WAIT_TARIFF_CL"
+                await update.message.reply_text("👉 Тариф Клиенту ($/кг):")
+            except: await update.message.reply_text("❌ Введи число.")
         elif d["state"] == "CARGO_WAIT_TARIFF_CL":
-            d["tariff_cl"], d["state"] = float(text.replace(',','.')), "CARGO_WAIT_RATE_AMD"
-            await update.message.reply_text("👉 Курс USD -> AMD:")
+            try:
+                d["tariff_cl"] = float(text.replace(',','.'))
+                d["state"] = "CARGO_WAIT_RATE_AMD"
+                await update.message.reply_text("👉 Курс USD -> AMD:")
+            except: await update.message.reply_text("❌ Введи число.")
         elif d["state"] == "CARGO_WAIT_RATE_AMD":
-            r_amd = float(text.replace(',','.'))
-            t_w, t_cl, t_cg = d['t_weight'], d['tariff_cl'], d['tariff_cg']
-            tot_cl_usd = t_w * t_cl
-            tot_amd = int(tot_cl_usd * r_amd)
-            profit = int((t_cl - t_cg) * t_w * r_amd)
-            cny_cargo = int(t_w * t_cg * 7.3)
-            
-            await update.message.reply_text(f"🚛 <b>CARGO INVOICE: {d['client'].upper()}</b>\n\nПАРАМЕТРЫ:\n• Вес: {t_w:.1f}кг | {d['t_pieces']} мест\n\nРАСЧЕТ:\n• Доставка: ${tot_cl_usd:.1f}\n✅ <b>К ОПЛАТЕ: {tot_amd:,} AMD</b>", parse_mode='HTML')
-            await update.message.reply_text(f"💼 <b>ВНУТРЕННИЙ РАСЧЕТ ({d['client'].upper()}):</b>\n\n1. В КАРГО:\n• Себестоимость: ${t_w*t_cg:.1f}\n🇨🇳 Перевести: {cny_cargo:,} ¥\n\n2. ПРИБЫЛЬ:\n💰 <b>{profit:,} AMD</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Excel", callback_data=f"cgexcel_{save_to_notion_cache(d)}"), InlineKeyboardButton("📑 Airtable", callback_data=f"cargodb_{save_to_notion_cache(d)}")]]))
-            del cargo_drafts[str(uid)]
+            try:
+                r_amd = float(text.replace(',','.'))
+                t_w, t_cl, t_cg = d['t_weight'], d['tariff_cl'], d['tariff_cg']
+                tot_cl_usd = t_w * t_cl
+                tot_amd = int(tot_cl_usd * r_amd)
+                profit = int((t_cl - t_cg) * t_w * r_amd)
+                cny_cargo = int(t_w * t_cg * 7.3)
+                
+                await update.message.reply_text(f"🚛 <b>CARGO INVOICE: {d['client'].upper()}</b>\n\nПАРАМЕТРЫ:\n• Вес: {t_w:.1f}кг | {d['t_pieces']} мест\n\nРАСЧЕТ:\n• Доставка: ${tot_cl_usd:.1f}\n✅ <b>К ОПЛАТЕ: {tot_amd:,} AMD</b>", parse_mode='HTML')
+                await update.message.reply_text(f"💼 <b>ВНУТРЕННИЙ РАСЧЕТ ({d['client'].upper()}):</b>\n\n1. В КАРГО:\n• Себестоимость: ${t_w*t_cg:.1f}\n🇨🇳 Перевести: {cny_cargo:,} ¥\n\n2. ПРИБЫЛЬ:\n💰 <b>{profit:,} AMD</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Excel", callback_data=f"cgexcel_{save_to_notion_cache(d)}"), InlineKeyboardButton("📑 Airtable", callback_data=f"cargodb_{save_to_notion_cache(d)}")]]))
+                del cargo_drafts[str(uid)]
+            except: await update.message.reply_text("❌ Введи число.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
@@ -228,11 +239,16 @@ async def process_kimi_logistics_result(update: Update, context: ContextTypes.DE
     d = cargo_drafts[str(uid)]
     item = d["items"][d["current_item_index"]]
     if not res: return await update.message.reply_text("❌ ИИ не понял. Введи вручную.")
-    pcs = int(res.get('pcs_per_ctn', 1)) or 1
-    t_qty = int(item['qty'])
+    pcs = int(res.get('pcs_per_ctn') or 1)
+    t_qty = int(item.get('qty') or 1)
     res['full_cartons'], res['remainder'] = t_qty // pcs, t_qty % pcs
+    # Защита от пустых числовых значений от Kimi
+    res['gw_kg'] = res.get('gw_kg') or 0.0
+    res['length'] = res.get('length') or 0
+    res['width'] = res.get('width') or 0
+    res['height'] = res.get('height') or 0
     d["temp_kimi"] = res
-    msg = f"🧠 <b>Kimi [{item['name']}]:</b>\nВ кор: {pcs} шт | Вес: {res.get('gw_kg', 0)}кг | {res.get('length', 0)}x{res.get('width', 0)}x{res.get('height', 0)}\n✅ Полных: {res['full_cartons']} | ⚠️ Остаток: {res['remainder']}"
+    msg = f"🧠 <b>Kimi [{item['name']}]:</b>\nВ кор: {pcs} шт | Вес: {res['gw_kg']}кг | {res['length']}x{res['width']}x{res['height']}\n✅ Полных: {res['full_cartons']} | ⚠️ Остаток: {res['remainder']}"
     await update.message.reply_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Сохранить", callback_data="cg_accept_kimi")]]))
 
 # ====================================================================
@@ -249,9 +265,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Введи номер товара из списка для изменения:")
     
     elif data.startswith("airtable_"):
-        d = get_from_notion_cache(data.split("_")[1])
-        requests.post(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка", headers={"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}, json={"records": [{"fields": {"Клиент": d["client"], "Заказ": d["inv_text"] + f"\nИТОГО: {d['tot_amd']} AMD"}}], "typecast": True})
-        await q.message.reply_text("✅ В Airtable!")
+        try:
+            d = get_from_notion_cache(data.split("_")[1])
+            requests.post(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка", headers={"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}, json={"records": [{"fields": {"Клиент": d["client"], "Заказ": d["inv_text"] + f"\nИТОГО: {d['tot_amd']} AMD"}}], "typecast": True})
+            await q.message.reply_text("✅ В Airtable!")
+        except: await q.message.reply_text("❌ Ошибка записи.")
 
     elif data.startswith("pk_"):
         cargo_drafts[str(uid)]["items"][cargo_drafts[str(uid)]["current_item_index"]]["pack_type"] = data
@@ -261,7 +279,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         d = cargo_drafts[str(uid)]
         i, r = d["items"][d["current_item_index"]], d["temp_kimi"]
         if "boxes" not in i: i["boxes"] = []
-        if r["full_cartons"] > 0: i["boxes"].append({"qty": r["full_cartons"], "w": r.get("gw_kg", 0), "l": r.get("length", 0), "w_dim": r.get("width", 0), "h": r.get("height", 0)})
+        if r["full_cartons"] > 0: i["boxes"].append({"qty": r["full_cartons"], "w": r["gw_kg"], "l": r["length"], "w_dim": r["width"], "h": r["height"]})
         if r["remainder"] == 0: d["current_item_index"] += 1
         else: await q.message.reply_text(f"Введи данные остатка для {i['name']} ({r['remainder']} шт):")
         await process_cargo_items(update, context, uid)
@@ -274,10 +292,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "cg_use_db":
         d = cargo_drafts[str(uid)]
         i = d["items"][d["current_item_index"]]
-        nums = re.findall(r"[-+]?\d*\.\d+|\d+", i.get("cm", "").replace(',', '.'))
-        dims = [float(n) for n in nums] if len(nums) >= 3 else [0,0,0]
-        f_box, rem = (int(i['qty']) // i['pcs_ctn']) if i.get('pcs_ctn') else (0, int(i['qty']))
-        i["boxes"] = [{"qty": f_box, "w": i.get("gw_kg", 0), "l": dims[0], "w_dim": dims[1], "h": dims[2]}]
+        nums = re.findall(r"[-+]?\d*\.\d+|\d+", str(i.get("cm") or "0x0x0").replace(',', '.'))
+        dims = [float(n) for n in nums] if len(nums) >= 3 else [0.0, 0.0, 0.0]
+        f_box, rem = int(i.get('qty', 0)) // int(i.get('pcs_ctn', 1) or 1), int(i.get('qty', 0)) % int(i.get('pcs_ctn', 1) or 1)
+        i["boxes"] = [{"qty": f_box, "w": i.get("gw_kg") or 0.0, "l": dims[0], "w_dim": dims[1], "h": dims[2]}]
         if rem == 0: d["current_item_index"] += 1
         else: await q.message.reply_text(f"Введи данные остатка для {i['name']} ({rem} шт):")
         await process_cargo_items(update, context, uid)
@@ -308,10 +326,18 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.delete()
     await ask_next_question(update, context, uid)
 
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Используем effective_user для надежности (сработает и в колбэках)
+    uid = update.effective_user.id
+    user_sessions.pop(uid, None)
+    if str(uid) in cargo_drafts: del cargo_drafts[str(uid)]
+    await update.message.reply_text("❌ Все текущие процессы отменены. Память очищена.")
+
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("client", client_command))
     app.add_handler(CommandHandler("done", done_command))
+    app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(callback_handler))
