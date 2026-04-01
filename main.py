@@ -1,9 +1,12 @@
 import os, requests, base64, json, io, re
 import pandas as pd
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
+# ====================================================================
+# НАСТРОЙКИ ОКРУЖЕНИЯ И КОНСТАНТЫ
+# ====================================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 DATABASE_ID = os.getenv("DATABASE_ID")
@@ -19,19 +22,22 @@ NOTION_HEADERS = {
     "Notion-Version": "2022-06-28"
 }
 
+# ====================================================================
+# ГЛОБАЛЬНЫЕ СЕССИИ (ПАМЯТЬ БОТА)
+# ====================================================================
 user_sessions = {}
 cargo_drafts = {}
-ff_sessions = {} # Инициализация сессий для Фулфилмента
+ff_sessions = {}
 
 # ====================================================================
-# НАСТРОЙКИ СКЛАДА FF И СОХРАНЕНИЕ
+# НАСТРОЙКИ СКЛАДА FF
 # ====================================================================
 BOX_PRICE_CNY = 7.77 # Цена коробки 60х40х40
 MAX_BOX_WEIGHT = 30.0 # Лимит веса на коробку
 FF_LIMIT_L, FF_LIMIT_W, FF_LIMIT_H = 60, 40, 40 # Мастер-короб
 
 def update_item_ff_data(page_id, unit_cm, unit_kg, barcodes):
-    """Сохраняет данные упаковки в базу AllProducts"""
+    """Сохраняет данные упаковки в базу AllProducts (Notion)"""
     payload = {"properties": {
         "Unit_cm": {"rich_text": [{"text": {"content": unit_cm}}]},
         "Unit_kg": {"number": unit_kg},
@@ -40,7 +46,7 @@ def update_item_ff_data(page_id, unit_cm, unit_kg, barcodes):
     requests.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=NOTION_HEADERS, json=payload)
 
 # ====================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И NOTION
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И NOTION API
 # ====================================================================
 def save_to_notion_cache(data, page_id=None):
     j_str = json.dumps(data, ensure_ascii=False)
@@ -88,12 +94,14 @@ def get_item_details(client_name, item_id):
             "gs_price": float(p.get("GS Price", {}).get("number") or 0.0),
             "pcs_ctn": p.get("Pcs/Ctn", {}).get("number"),
             "gw_kg": p.get("GW kg", {}).get("number"),
-            "cm": p.get("cm", {}).get("rich_text", [])[0]["plain_text"] if p.get("cm", {}).get("rich_text", []) else None
+            "cm": p.get("cm", {}).get("rich_text", [])[0]["plain_text"] if p.get("cm", {}).get("rich_text", []) else None,
+            "unit_cm": p.get("Unit_cm", {}).get("rich_text", [])[0]["plain_text"] if p.get("Unit_cm", {}).get("rich_text", []) else None,
+            "unit_kg": p.get("Unit_kg", {}).get("number")
         }
     except: return None
 
 # ====================================================================
-# ИИ ЛОГИКА
+# ИИ ЛОГИКА (KIMI)
 # ====================================================================
 def recognize_photos_batch(photo_urls, catalog_text):
     prompt = f"Ты эксперт. Каталог:\n{catalog_text}\n\nНайди ID товаров для этих фото. Верни СТРОГО JSON массив строк."
@@ -179,12 +187,11 @@ async def finish_ff(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int
     await context.bot.send_message(chat_id=update.effective_chat.id, text=msg_cl, parse_mode='HTML')
     await context.bot.send_message(chat_id=update.effective_chat.id, text=msg_adm, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
     
-    # Очистка сессии FF
     if uid in ff_sessions:
         del ff_sessions[uid]
 
 # ====================================================================
-# МОДУЛЬ КАРГО (ОСНОВНАЯ МАТЕМАТИКА)
+# МОДУЛЬ КАРГО (ЛОГИСТИКА)
 # ====================================================================
 async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
     d = cargo_drafts[str(uid)]
@@ -288,23 +295,23 @@ async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid, text = update.message.from_user.id, update.message.text.strip()
     
-    # ПРОВЕРКА СОСТОЯНИЯ FF ОЖИДАНИЯ ВВОДА
+    # --- FF РУЧНОЙ ВВОД ---
     if uid in ff_sessions and ff_sessions[uid]["state"] == "FF_WAIT_UNIT":
         try:
             n = [float(x) for x in text.replace(',','.').split()]
             s = ff_sessions[uid]
             item = s["items"][s["current_idx"]]
             
-            # Сохраняем в базу на будущее
             update_item_ff_data(item["page_id"], f"{n[0]}x{n[1]}x{n[2]}", n[3], 1)
             
             s["units"].append({"name": item["name"], "qty": int(item.get("qty", 1)), "dims": (n[0], n[1], n[2]), "weight": n[3]})
             s["current_idx"] += 1
             await ask_ff_item(update, context, uid)
         except: 
-            await update.message.reply_text("❌ Ошибка. Формат: Д Ш В Вес")
+            await update.message.reply_text("❌ Ошибка. Формат: Д Ш В Вес (через пробел)")
         return
 
+    # --- ЗАКУПКА ---
     if uid in user_sessions:
         s = user_sessions[uid]
         if s["state"] == "COLLECTING" and text.isdigit():
@@ -323,6 +330,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             s["items"][s["current_item_index"]]["shipping"] = text
         await ask_next_question(update, context, uid)
     
+    # --- КАРГО ---
     elif str(uid) in cargo_drafts:
         d = cargo_drafts[str(uid)]
         if d["state"] == "CARGO_WAIT_DIMS":
@@ -353,7 +361,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 await update.message.reply_text(f"🚛 <b>CARGO INVOICE: {d['client'].upper()}</b>\n\nПАРАМЕТРЫ:\n• Вес: {t_w:.1f}кг | {d['t_pieces']} мест\n\nРАСЧЕТ:\n• Доставка: ${tot_cl_usd:.1f}\n✅ <b>К ОПЛАТЕ: {tot_amd:,} AMD</b>", parse_mode='HTML')
                 
-                # Сохраняем драфт для кнопок
                 pid = save_to_notion_cache(d)
                 
                 kb = [
@@ -472,11 +479,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_cargo_items(update, context, uid)
 
 # ====================================================================
-# КОМАНДЫ
+# КОМАНДЫ БОТА
 # ====================================================================
 async def client_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(update.message.text.split()) < 2: 
-        return await update.message.reply_text("❌ /client Имя")
+        return await update.message.reply_text("❌ Формат: /client Имя")
     user_sessions[update.message.from_user.id] = {"client": update.message.text.split()[1], "orders": [], "items": [], "current_item_index": 0, "state": "COLLECTING"}
     await update.message.reply_text(f"✅ Клиент {update.message.text.split()[1]}.\nЖду фото или ID.")
 
@@ -484,9 +491,9 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
     if uid not in user_sessions: return
     s = user_sessions[uid]
-    msg = await update.message.reply_text("⏳ Обработка...")
-    photo_urls = [o["val"] for o in s["orders"] if o["type"] == "photo"]
+    msg = await update.message.reply_text("⏳ ИИ обрабатывает фото и данные...")
     
+    photo_urls = [o["val"] for o in s["orders"] if o["type"] == "photo"]
     if photo_urls:
         ids = recognize_photos_batch(photo_urls, get_client_catalog(s["client"]))
         for rid in ids:
@@ -504,19 +511,36 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     user_sessions.pop(uid, None)
-    if str(uid) in cargo_drafts: 
-        del cargo_drafts[str(uid)]
-    if uid in ff_sessions:
-        del ff_sessions[uid]
+    if str(uid) in cargo_drafts: del cargo_drafts[str(uid)]
+    if uid in ff_sessions: del ff_sessions[uid]
     await update.message.reply_text("❌ Все текущие процессы отменены.\nПамять очищена.")
 
+# ====================================================================
+# ИНИЦИАЛИЗАЦИЯ И ЗАПУСК (WEBHOOKS / POLLING)
+# ====================================================================
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    
     app.add_handler(CommandHandler("client", client_command))
     app.add_handler(CommandHandler("done", done_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(callback_handler))
-    print("Бот запущен!")
-    app.run_polling()
+
+    # Получаем порт от Railway (или ставим 8080 для локалки)
+    PORT = int(os.environ.get('PORT', '8080'))
+    
+    # Проверяем, есть ли переменная WEBHOOK_URL
+    WEBHOOK_URL = os.environ.get("WEBHOOK_URL") 
+
+    if WEBHOOK_URL:
+        print(f"ПРОДАКШЕН: Запуск Webhook на порту {PORT}...")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=WEBHOOK_URL
+        )
+    else:
+        print("РАЗРАБОТКА: Запуск локального Polling...")
+        app.run_polling()
