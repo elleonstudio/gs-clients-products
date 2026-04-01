@@ -13,7 +13,7 @@ DATABASE_ID = os.getenv("DATABASE_ID")
 KIMI_TOKEN = os.getenv("KIMI_TOKEN")
 
 NOTION_CACHE_ID = "4547cbb7cbc54138a5ead9f942bd30dc" 
-PACKAGES_DATABASE_ID = "32a8c4d1fb0e806ebb98f5995704d0e5" # База пакетов
+PACKAGES_DATABASE_ID = "32a8c4d1fb0e806ebb98f5995704d0e5" 
 AIRTABLE_TOKEN = "patD95Wp6hbmXnSH7.401bcf4ca42844c15f76c8361ddb7d5b7a4551d58c390de27ba3586fdd7d0cc7"
 AIRTABLE_BASE_ID = "appRIlSL63Kxh6iWX"
 
@@ -34,7 +34,8 @@ ff_sessions = {}
 # НАСТРОЙКИ СКЛАДА FF И ФУНКЦИИ
 # ====================================================================
 BOX_PRICE_CNY = 7.77 # Цена мастер-короба
-MAX_BOX_WEIGHT = 30.0 # Лимит веса
+MAX_BOX_WEIGHT = 30.0 # Лимит веса брутто
+EMPTY_BOX_WEIGHT = 1.2 # Вес самого картона 60х40х40
 
 def update_item_ff_data(page_id, unit_cm, unit_kg, barcodes):
     payload = {"properties": {
@@ -59,9 +60,9 @@ def optimize_boxes_with_weight(items):
     
     for item in items:
         for _ in range(int(item.get('qty', 0))):
-            if 'vol' in item: # Для наборов
+            if 'vol' in item: 
                 vol = item['vol']
-            else: # Для одиночных
+            else: 
                 l, w, h = item.get('dims', (1,1,1))
                 vol = l * w * h
             all_units.append({'weight': float(item.get('weight', 0.0)), 'vol': vol})
@@ -75,7 +76,8 @@ def optimize_boxes_with_weight(items):
                 placed = True
                 break
         if not placed:
-            boxes.append({'rem_vol': (MAX_L*MAX_W*MAX_H) - unit['vol'], 'cur_w': unit['weight']})
+            # Инициализируем новую коробку, сразу добавляя вес самого картона (1.2 кг)
+            boxes.append({'rem_vol': (MAX_L*MAX_W*MAX_H) - unit['vol'], 'cur_w': unit['weight'] + EMPTY_BOX_WEIGHT})
     return boxes
 
 # ====================================================================
@@ -155,14 +157,111 @@ def parse_logistics_with_kimi(text, photo_url):
     except: return None
 
 # ====================================================================
-# МОДУЛЬ ФУЛФИЛМЕНТА (FF) - ИНТЕРАКТИВ И РАСЧЕТЫ
+# МОДУЛЬ 1: ЗАКУПКА (/client)
+# ====================================================================
+async def client_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args:
+        return await update.message.reply_text("❌ Ошибка! Введи: /client Имя_Клиента")
+    
+    client_name = args[0]
+    user_sessions[update.message.from_user.id] = {
+        "client": client_name,
+        "orders": [], 
+        "items": [],  
+        "current_item_index": 0,
+        "state": "COLLECTING"
+    }
+    await update.message.reply_text(f"✅ Клиент <b>{client_name}</b> принят.\nОтправляй фото товаров или пиши ID текстом. Когда закончишь — напиши /done.", parse_mode='HTML')
+
+async def ask_next_procurement(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
+    s = user_sessions[uid]
+    idx = s.get("current_item_index", 0)
+    
+    if idx >= len(s["items"]):
+        return await generate_procurement_invoice(update, context, uid)
+    
+    item = s["items"][idx]
+    
+    if not item.get("qty_confirmed"):
+        s["state"] = "ASKING_QTY"
+        return await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=f"❓ Товар: <b>{item['name']}</b>\nВведи количество (шт):",
+            parse_mode='HTML'
+        )
+    
+    if item.get("shipping") is None:
+        s["state"] = "ASKING_SHIPPING"
+        return await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=f"🚚 Цена доставки по Китаю для: <b>{item['name']}</b> ({item['qty']} шт)?",
+            parse_mode='HTML'
+        )
+    
+    s["current_item_index"] += 1
+    await ask_next_procurement(update, context, uid)
+
+async def generate_procurement_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, page_id=None):
+    s = user_sessions[uid]
+    c_rate = 58.0 
+    subtotal = 0
+    hidden_profit_cny = 0
+    inv_text = ""
+    
+    for i in s["items"]:
+        q = int(i.get('qty') or 1)
+        p = float(i.get('client_price') or 0.0)
+        gs = float(i.get('gs_price') or 0.0)
+        sh = float(i.get('shipping') or 0.0)
+        
+        line_total = (q * p) + sh
+        subtotal += line_total
+        hidden_profit_cny += (p - gs) * q # Скрытая маржа
+        inv_text += f"• {i['name']}: — {q} шт\n{q} × {p} + {sh} = {line_total:.1f}¥\n\n"
+
+    commission_amd = max(10000, int(subtotal * 0.03 * c_rate))
+    commission_cny = commission_amd / c_rate
+    total_cny = subtotal + commission_cny
+    total_amd = int((subtotal * c_rate) + commission_amd)
+
+    full_invoice = (
+        f"<b>ТОВАРНАЯ ВЕДОМОСТЬ:</b>\n\n"
+        f"{inv_text}"
+        f"────────────────────────\n"
+        f"SUBTOTAL: {subtotal:.1f}¥\n\n"
+        f"КОМИССИЯ И СЕРВИС\n"
+        f"(Минимальная 10000 AMD): {commission_cny:.1f}¥\n\n"
+        f"3. ИТОГОВЫЙ РАСЧЕТ\n"
+        f"• Всего в юанях: {total_cny:.1f}¥\n"
+        f"• Курс: {c_rate}\n\n"
+        f"✅ <b>ИТОГО К ОПЛАТЕ: {total_amd:,} AMD</b>"
+    )
+
+    s.update({"full_invoice": full_invoice, "tot_amd": total_amd, "subtotal_cny": subtotal, "client_rate": c_rate})
+    pid = save_to_notion_cache(s, page_id=page_id)
+
+    kb = [
+        [InlineKeyboardButton("✏️ Изменить товар", callback_data=f"editinit_{pid}")],
+        [InlineKeyboardButton("📑 В Airtable", callback_data=f"air_proc_{pid}"), InlineKeyboardButton("🧮 В Карго", callback_data=f"tocargo_{pid}")],
+        [InlineKeyboardButton("📊 Excel", callback_data=f"invexcel_{pid}"), InlineKeyboardButton("📦 Склад (FF)", callback_data=f"ffinit_{pid}")]
+    ]
+    
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=full_invoice, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+    
+    # Сообщение администратору о скрытой марже
+    msg_adm = f"💼 <b>ВНУТРЕННЯЯ ПРИБЫЛЬ ЗАКУПКИ:</b>\nСкрытая маржа (GS vs Client): {hidden_profit_cny:.1f} ¥"
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg_adm, parse_mode='HTML')
+
+# ====================================================================
+# МОДУЛЬ 2: ФУЛФИЛМЕНТ (FF)
 # ====================================================================
 async def start_ff_process(update: Update, context: ContextTypes.DEFAULT_TYPE, pid: str):
     uid = update.effective_user.id
     data = get_from_notion_cache(pid)
     ff_sessions[uid] = {
         "client": data["client"], "pid": pid, "items": data["items"], 
-        "bundled_idx": [], "selected_idx": [], "bundles": [], "units": [],
+        "selected_idx": [], "bundles": [], "units": [],
         "state": "FF_CHECK_DIMS", "current_idx": 0
     }
     await check_next_ff_dim(update, context, uid)
@@ -176,7 +275,6 @@ async def check_next_ff_dim(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📐 Нет размеров для <b>{item['name']}</b>\nВведи Д Ш В Вес (через пробел):", parse_mode='HTML')
             return
         else:
-            # Парсим из базы
             d = [float(n) for n in re.findall(r"\d+\.?\d*", item["unit_cm"])]
             s["units"].append({"name": item["name"], "qty": int(item.get("qty", 1)), "dims": (d[0], d[1], d[2]), "weight": item.get("unit_kg", 0)})
         s["current_idx"] += 1
@@ -187,14 +285,15 @@ async def show_ff_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: 
     s = ff_sessions[uid]
     s["state"] = "FF_MENU"
     kb = []
+    
     for i, unit in enumerate(s['units']):
-        if i in s['bundled_idx']: continue
+        if unit['qty'] <= 0: continue # Идеальный вариант: прячем товары, если они уже все ушли в наборы
         mark = "✅" if i in s['selected_idx'] else "⬛️"
         kb.append([InlineKeyboardButton(f"{mark} {unit['name']} ({unit['qty']} шт)", callback_data=f"ffsel_{i}")])
     
     if s['selected_idx']:
         kb.append([InlineKeyboardButton("🎁 Создать набор из выбранных", callback_data="ff_make_bundle")])
-    kb.append([InlineKeyboardButton("📦 Упаковать и рассчитать", callback_data="ff_finish_setup")])
+    kb.append([InlineKeyboardButton("📦 Упаковать оставшиеся и рассчитать", callback_data="ff_finish_setup")])
     
     text = f"📦 <b>Меню Фулфилмента: {s['client'].upper()}</b>\nВыдели товары для наборов или жми 'Упаковать':"
     if update.callback_query:
@@ -205,39 +304,35 @@ async def show_ff_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: 
 async def finish_ff_calculation(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
     s = ff_sessions[uid]
     
-    # Собираем все не-бандлы
-    unpacked_units = [u for i, u in enumerate(s['units']) if i not in s['bundled_idx']]
+    # Берем только те юниты, у которых остался qty > 0 после сборок наборов
+    unpacked_units = [u for u in s['units'] if u['qty'] > 0]
     all_items_to_pack = unpacked_units + s['bundles']
     
     boxes = optimize_boxes_with_weight(all_items_to_pack)
     b_cnt = len(boxes) 
     total_w = sum(b['cur_w'] for b in boxes)
     
-    # Параметры из опросника
     tariff = s.get('warehouse_tariff', 0.0)
     markup = s.get('my_markup', 0.0)
     barcodes = s.get('barcode_rolls', 0)
     
-    # Математика
     total_u_singles = sum(u['qty'] for u in unpacked_units)
     total_u_bundles = sum(b['qty'] for b in s['bundles'])
     
     boxes_cost = b_cnt * BOX_PRICE_CNY
     
-    # Одиночные
     singles_cost_client = total_u_singles * (tariff + markup)
     singles_cost_real = total_u_singles * tariff
     
-    # Наборы
     pkg_cost = sum(b['pkg_price'] * b['qty'] for b in s['bundles'])
     bundles_work_cost = sum(b['work_price'] * b['qty'] for b in s['bundles'])
-    bundles_cost_client = pkg_cost + bundles_work_cost + (total_u_bundles * markup) # Наценка на наборы тоже
+    bundles_cost_client = pkg_cost + bundles_work_cost + (total_u_bundles * markup) 
     bundles_cost_real = pkg_cost + bundles_work_cost
     
     total_client_ff = singles_cost_client + bundles_cost_client + boxes_cost
     total_real_ff = singles_cost_real + bundles_cost_real + boxes_cost
     profit = total_client_ff - total_real_ff
-    materials_cost = boxes_cost + pkg_cost # Расход материалов для Airtable
+    materials_cost = boxes_cost + pkg_cost 
     
     msg_cl = (
         f"📦 <b>Результат FF</b>\n"
@@ -251,7 +346,6 @@ async def finish_ff_calculation(update: Update, context: ContextTypes.DEFAULT_TY
     )
     msg_adm = f"💼 <b>FF ВНУТРЕННИЙ:</b>\n• Прибыль: {profit:.2f} ¥\n• Рулонов ШК: {barcodes}"
     
-    # Сохраняем расширенные данные для Airtable
     s.update({
         "ff_total_u_singles": total_u_singles,
         "ff_tariff": tariff,
@@ -271,7 +365,7 @@ async def finish_ff_calculation(update: Update, context: ContextTypes.DEFAULT_TY
     if uid in ff_sessions: del ff_sessions[uid]
 
 # ====================================================================
-# МОДУЛЬ КАРГО (ЛОГИСТИКА)
+# МОДУЛЬ 3: КАРГО (ЛОГИСТИКА)
 # ====================================================================
 async def process_cargo_items(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
     d = cargo_drafts[str(uid)]
@@ -320,71 +414,6 @@ async def finish_cargo_dims(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     d.update({"t_weight": t_w, "t_vol": t_v, "t_pieces": t_p, "density": density, "state": "CARGO_WAIT_TARIFF_CG"})
     await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📊 <b>ИТОГ:</b> {t_w:.1f}кг | {t_v:.2f}м³ | {t_p} мест. Плотность: {density}\n👉 Напиши Тариф Карго ($/кг):", parse_mode='HTML')
 
-# ====================================================================
-# МОДУЛЬ ЗАКУПКИ
-# ====================================================================
-async def ask_next_question(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
-    if uid not in user_sessions: return
-    s = user_sessions[uid]
-    idx = s.get("current_item_index", 0)
-    if idx >= len(s["items"]): 
-        return await generate_final_invoice(update, context, uid)
-    
-    item = s["items"][idx]
-    if not item.get("qty_confirmed"):
-        s["state"] = "ASKING_QTY"
-        return await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❓ Товар: **{item['name']}**\nВведи количество:")
-    if item.get("shipping") is None:
-        s["state"] = "ASKING_SHIPPING"
-        return await context.bot.send_message(chat_id=update.effective_chat.id, text=f"🚚 Цена доставки для: **{item['name']}** ({item['qty']} шт)?")
-    
-    s["current_item_index"] += 1
-    await ask_next_question(update, context, uid)
-
-async def generate_final_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, page_id=None):
-    s = user_sessions[uid]
-    c_rate = 58.0
-    subtotal = 0
-    
-    now = datetime.now()
-    client_code = s['client'].upper()[:4]
-    inv_number = f"{client_code}-{now.strftime('%H%M')}"
-    date_str = now.strftime('%m.%d.%Y')
-    
-    inv_text = f"COMMERCIAL INVOICE: {inv_number}\n📅 Date: {date_str}\n\n1. ТОВАРНАЯ ВЕДОМОСТЬ:\n"
-    
-    for i in s["items"]:
-        q, p, sh = int(i.get('qty') or 1), float(i.get('client_price') or 0.0), float(i.get('shipping') or 0.0)
-        lt = (q * p) + sh
-        subtotal += lt
-        inv_text += f"• {i['name']}: — {q} шт\n{q} × {p} + {sh} = {lt:.1f}¥\n\n"
-
-    c_amd = max(10000, int(subtotal * 0.03 * c_rate))
-    c_cny = c_amd / c_rate
-    tot_cny = subtotal + c_cny
-    tot_amd = int((subtotal * c_rate) + c_amd)
-
-    full_msg = (
-        f"{inv_text}"
-        f"────────────────────────\n"
-        f"SUBTOTAL: {subtotal:.1f}¥\n\n"
-        f"2. КОМИССИЯ И СЕРВИС\n"
-        f"(Минимальная 10000 AMD): {c_cny:.1f}¥\n\n"
-        f"3. ИТОГОВЫЙ РАСЧЕТ\n"
-        f"• Всего в юанях: {tot_cny:.1f}¥\n"
-        f"• Курс: {c_rate}\n\n"
-        f"✅ ИТОГО К ОПЛАТЕ: {tot_amd:,} AMD"
-    )
-
-    s.update({"subtotal_cny": subtotal, "tot_amd": tot_amd, "client_rate": c_rate, "full_invoice": full_msg})
-    new_pid = save_to_notion_cache(s, page_id=page_id)
-
-    kb = [
-        [InlineKeyboardButton("✏️ Изменить товар", callback_data=f"editinit_{new_pid}")], 
-        [InlineKeyboardButton("📑 В Airtable", callback_data=f"airtable_{new_pid}"), InlineKeyboardButton("🧮 В Карго", callback_data=f"tocargo_{new_pid}")],
-        [InlineKeyboardButton("📊 Excel", callback_data=f"invexcel_{new_pid}"), InlineKeyboardButton("📦 Склад (FF)", callback_data=f"ffinit_{new_pid}")]
-    ]
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=full_msg, reply_markup=InlineKeyboardMarkup(kb))
 
 # ====================================================================
 # MESSAGE HANDLERS
@@ -422,18 +451,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 b_qty = s['temp_bundle_qty']
                 b_pkg = s['temp_bundle_pkg']
                 
+                # Защита от создания наборов больше, чем есть товара
+                for i in s['selected_idx']:
+                    if s['units'][i]['qty'] < b_qty:
+                        await update.message.reply_text(f"❌ Ошибка! У товара {s['units'][i]['name']} остаток всего {s['units'][i]['qty']} шт. Нельзя собрать {b_qty} наборов.")
+                        return
+
                 b_weight = 0; b_vol = 0
                 for i in s['selected_idx']:
                     u = s['units'][i]
                     b_weight += u['weight']
                     l, w, h = u['dims']
                     b_vol += (l * w * h)
+                    # ИДЕАЛЬНЫЙ ВАРИАНТ ПУНКТ 1: Вычитаем количество!
+                    s['units'][i]['qty'] -= b_qty
                 
                 s['bundles'].append({
                     'name': f"Набор ({len(s['selected_idx'])} предм.)", 'qty': b_qty, 
                     'weight': b_weight, 'vol': b_vol, 'pkg_price': b_pkg, 'work_price': work_price
                 })
-                s['bundled_idx'].extend(s['selected_idx'])
                 s['selected_idx'] = []
                 await show_ff_menu(update, context, uid)
             except: await update.message.reply_text("❌ Введи число:")
@@ -472,14 +508,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for i, item in enumerate(s["items"]):
                 if text == str(i+1):
                     s["current_item_index"], item["qty_confirmed"], item["shipping"] = i, False, None
-                    return await ask_next_question(update, context, uid)
+                    return await ask_next_procurement(update, context, uid)
             return await update.message.reply_text("❌ Нет такого номера.")
         elif s["state"] == "ASKING_QTY": 
             s["items"][s["current_item_index"]]["qty"] = text
             s["items"][s["current_item_index"]]["qty_confirmed"] = True
         elif s["state"] == "ASKING_SHIPPING": 
             s["items"][s["current_item_index"]]["shipping"] = text
-        await ask_next_question(update, context, uid)
+        await ask_next_procurement(update, context, uid)
     
     # --- КАРГО ---
     elif str(uid) in cargo_drafts:
@@ -509,6 +545,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cny_cargo = int(t_w * t_cg * 7.3)
                 
                 d["tot_amd"] = tot_amd
+                d["r_amd"] = r_amd
                 
                 await update.message.reply_text(f"🚛 <b>CARGO INVOICE: {d['client'].upper()}</b>\n\nПАРАМЕТРЫ:\n• Вес: {t_w:.1f}кг | {d['t_pieces']} мест\n\nРАСЧЕТ:\n• Доставка: ${tot_cl_usd:.1f}\n✅ <b>К ОПЛАТЕ: {tot_amd:,} AMD</b>", parse_mode='HTML')
                 
@@ -615,8 +652,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_document(chat_id=q.message.chat_id, document=InputFile(output, filename=f"Cargo_{d.get('client', 'Order').upper()}.xlsx"))
 
     # --- ПРЯМОЙ ЭКСПОРТ В AIRTABLE (ЗАКУПКА) ---
-    elif data.startswith("airtable_"):
-        cache_pid = data.split("_")[1]
+    elif data.startswith("air_proc_"):
+        cache_pid = data.split("_")[2]
         try:
             order_data = get_from_notion_cache(cache_pid)
             airtable_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Закупка"
@@ -629,9 +666,41 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if response.status_code == 200:
                 await q.message.reply_text("✅ Данные успешно экспортированы в Airtable (Закупка)!")
             else:
-                await q.message.reply_text(f"❌ Ошибка Airtable: {response.status_code}\nОтвет: {response.text}")
+                await q.message.reply_text(f"❌ Ошибка Airtable: {response.text}")
         except Exception as e:
             await q.message.reply_text(f"❌ Сбой при экспорте: {str(e)}")
+
+    # --- ПУНКТ 2: СПЕЦИФИКАЦИЯ ЭКСПОРТА В AIRTABLE (КАРГО) ---
+    elif data.startswith("cargodb_"):
+        pid = data.split("_")[1]
+        try:
+            d = get_from_notion_cache(pid)
+            airtable_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Логистика Карго"
+            headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
+            
+            payload = {
+                "records": [{
+                    "fields": {
+                        "Party_ID": f"CARGO-{d['client'][:4].upper()}",
+                        "Total_Weight_KG": float(d.get("t_weight", 0)),
+                        "Total_Volume_CBM": float(d.get("t_vol", 0)),
+                        "Tariff_Cargo_USD": float(d.get("tariff_cg", 0)),
+                        "Tariff_Client_USD": float(d.get("tariff_cl", 0)),
+                        "Density": float(d.get("density", 0)),
+                        "Total_Pieces": int(d.get("t_pieces", 0)),
+                        "Rate USD CNY": 7.3,
+                        "Rate_USD_AMD": float(d.get("r_amd", 400))
+                    }
+                }],
+                "typecast": True
+            }
+            response = requests.post(airtable_url, headers=headers, json=payload)
+            if response.status_code == 200:
+                await q.message.reply_text("✅ Данные логистики Карго выгружены в Airtable!")
+            else:
+                await q.message.reply_text(f"❌ Ошибка Airtable: {response.text}")
+        except Exception as e:
+            await q.message.reply_text(f"❌ Сбой выгрузки Карго: {str(e)}")
 
     # --- ПРЯМОЙ ЭКСПОРТ В AIRTABLE (ФУЛФИЛМЕНТ) ---
     elif data.startswith("ffair_"):
@@ -658,7 +727,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if response.status_code == 200:
                 await q.message.reply_text("✅ Данные FF выгружены в Airtable!")
             else:
-                await q.message.reply_text(f"❌ Ошибка Airtable: {response.status_code}\nОтвет: {response.text}")
+                await q.message.reply_text(f"❌ Ошибка Airtable: {response.text}")
         except Exception as e:
             await q.message.reply_text(f"❌ Сбой выгрузки FF: {str(e)}")
 
@@ -684,7 +753,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     elif data == "ff_finish_setup":
         ff_sessions[uid]["state"] = "FF_WAIT_TARIFF"
-        await q.message.reply_text("Тариф склада за упаковку 1 шт (¥)?")
+        await q.message.reply_text("Тариф склада за упаковку 1 шт (одиночные) (¥)?")
 
     # --- КАРГО CALLBACKS ---
     elif data.startswith("editinit_"):
@@ -742,7 +811,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if det: s["items"].append(det)
             
     await msg.delete()
-    await ask_next_question(update, context, uid)
+    await ask_next_procurement(update, context, uid)
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
